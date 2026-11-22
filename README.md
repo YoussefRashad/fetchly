@@ -190,3 +190,9 @@ Phase 1, the desktop app, is done. Planned next:
   "Download with Fetchly" link menu, handing the URL to the app.
 - Course playlists, and courses the user has bought on login-gated sites,
   using the user's own browser session (best effort).
+
+## License
+
+[MIT](LICENSE). yt-dlp, ffmpeg and aria2 are separate programs under their
+own licenses; Fetchly downloads them from their official releases and does
+not bundle them.

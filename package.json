@@ -2,6 +2,7 @@
   "name": "fetchly",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "Download manager for Windows: videos, playlists and direct files, with pause/resume that survives restarts",
   "repository": {
     "type": "git",
