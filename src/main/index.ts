@@ -1,7 +1,8 @@
 import { join } from 'node:path';
 import { app, BrowserWindow, dialog, ipcMain, shell, type Tray } from 'electron';
-import type { Settings } from '../shared/types';
+import type { AppStatus, Settings } from '../shared/types';
 import { Binaries } from './binaries';
+import { EngineHost } from './engineHost';
 import { FileEngine, startAria2 } from './engines/file';
 import { MediaEngine } from './engines/media';
 import { createHandlers, type Handlers } from './ipc';
@@ -13,8 +14,8 @@ import { killStrays } from './strays';
 
 let win: BrowserWindow | null = null;
 let tray: Tray | null = null;
-let queue: Queue | null = null;
-let stopAria2: (() => Promise<void>) | null = null;
+/** Starts the tools and owns the queue; null until main() ran. */
+let host: EngineHost<Queue> | null = null;
 let quitting = false;
 
 function createWindow(): BrowserWindow {
@@ -71,26 +72,51 @@ async function main(): Promise<void> {
     ? `The saved download list could not be read and was set aside as ${loaded.recoveredCorrupt}. The list starts empty.`
     : null;
 
-  const binaries = new Binaries(join(userData, 'bin'));
+  const binDir = join(userData, 'bin');
+  const binaries = new Binaries(binDir);
 
-  /** Starts aria2 and both engines. Safe to call once the three tools are installed. */
-  const startEngines = async (): Promise<void> => {
-    if (queue) return;
+  /** The last value from queue.onSaveState: the text of the last failed write of jobs.json, or null. */
+  let saveError: string | null = null;
+  /** The file engine createQueue built; a restarted aria2 is handed to it. */
+  let fileEngine: FileEngine | null = null;
+
+  const appStatus = (): AppStatus => ({ engine: engines.status(), saveError });
+  const pushStatus = (): void => send('hammel:status', appStatus());
+
+  const engines = new EngineHost<Queue>({
+    toolsInstalled: async () => (await binaries.status()).every((b) => b.installed),
     // A previous run that was killed may have left its tools writing to the partial files.
-    await killStrays(join(userData, 'bin'));
-    const aria2 = await startAria2(binaries.path('aria2c'), join(userData, 'aria2'));
-    stopAria2 = aria2.stop;
-    const media = new MediaEngine({ command: binaries.path('yt-dlp'), prefixArgs: [] }, binaries.path('ffmpeg'));
-    const file = new FileEngine(aria2.rpc);
-    queue = new Queue({ store, media, file, initial: loaded.snapshot, settings });
-    queue.onChanged((s) => send('hammel:changed', s));
-    if (tray) attachQueue(tray, queue, showWindow);
-    if (settings.autoResumeOnStart) queue.resumeAllPaused();
-    send('hammel:changed', queue.snapshot());
-  };
+    killStrays: () => killStrays(binDir),
+    startAria2: () => startAria2(binaries.path('aria2c'), join(userData, 'aria2')),
+    createQueue: (daemon, straysCleared) => {
+      const media = new MediaEngine({ command: binaries.path('yt-dlp'), prefixArgs: [] }, binaries.path('ffmpeg'));
+      const file = new FileEngine(daemon.rpc, { daemonAlive: () => daemon.alive() });
+      const queue = new Queue({ store, media, file, initial: loaded.snapshot, settings, straysCleared });
+      fileEngine = file;
+      queue.onChanged((s) => send('hammel:changed', s));
+      queue.onSaveState((error) => {
+        if (error === saveError) return;
+        saveError = error;
+        pushStatus();
+      });
+      if (tray) attachQueue(tray, queue, showWindow);
+      // resumeAllPaused passes over cut-off jobs.
+      if (settings.autoResumeOnStart) queue.resumeAllPaused();
+      send('hammel:changed', queue.snapshot());
+      return queue;
+    },
+    attachDaemon: (daemon) => {
+      if (!fileEngine) throw new Error('the file engine is not running');
+      fileEngine.attach(daemon);
+    },
+    onStatus: pushStatus,
+  });
+  host = engines;
 
   const handlers: Handlers = createHandlers({
-    queue: () => queue,
+    queue: () => engines.queue(),
+    status: appStatus,
+    retryEngines: () => engines.retry(),
     getSettings: () => settings,
     saveSettings: (s) => {
       settings = s;
@@ -100,7 +126,7 @@ async function main(): Promise<void> {
     probe: (url) => probeUrl(url, { command: binaries.path('yt-dlp'), prefixArgs: [] }),
     binaries,
     onInstallProgress: (name, pct) => send('hammel:installProgress', name, pct),
-    afterInstall: startEngines,
+    afterInstall: () => engines.start(),
     pickFolder: async () => {
       if (!win) return null;
       const picked = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] });
@@ -123,16 +149,10 @@ async function main(): Promise<void> {
   }
 
   showWindow();
-  tray = createTray({ showWindow, queue: () => queue, quit: () => app.quit() });
+  tray = createTray({ showWindow, queue: () => engines.queue(), quit: () => app.quit() });
 
-  const status = await binaries.status();
-  if (status.every((b) => b.installed)) {
-    try {
-      await startEngines();
-    } catch (e) {
-      notice = `The download tools could not be started: ${e instanceof Error ? e.message : String(e)}`;
-    }
-  }
+  // Never rejects: a missing tool or a failed start is the engine status the window shows.
+  await engines.start();
 }
 
 if (!app.requestSingleInstanceLock()) {
@@ -141,15 +161,19 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', showWindow);
   void app.whenReady().then(main);
 
-  // Pause what is running so partial files are left in a resumable state, then let the app go.
+  // Stop what is running so partial files are left in a resumable state, then let the app go.
+  // A job whose stop is not confirmed in time is already saved as cut off; the next start checks.
   app.on('before-quit', (event) => {
     if (quitting) return;
     quitting = true;
     event.preventDefault();
     const cap = new Promise<void>((r) => setTimeout(r, 5000));
     const tidy = (async () => {
-      await queue?.pauseAll();
-      await stopAria2?.();
+      try {
+        await host?.queue()?.shutdown();
+      } finally {
+        await host?.daemon()?.stop();
+      }
     })().catch(() => undefined);
     void Promise.race([tidy, cap]).then(() => app.exit(0));
   });

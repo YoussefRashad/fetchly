@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { isAbsoluteDir, isLangList, isQuality, isUsableDoneName, normalizeSettings, parseSettings, parseSnapshotFile } from '../../src/main/jobs/validate';
+import { copyQuality, isAbsoluteDir, isLangList, isQuality, isUsableDoneName, normalizeSettings, parseSettings, parseSnapshotFile } from '../../src/main/jobs/validate';
+import { validateUrl } from '../../src/main/probe';
 import { HEIGHTS, type Group, type Job, type Quality, type Settings } from '../../src/shared/types';
 import { makeJob, makeSettings } from '../helpers';
 
@@ -906,6 +907,230 @@ describe('isQuality, isLangList and isAbsoluteDir', () => {
     ['a list', ['D:\\Dl']],
   ])('refuses %s as an absolute folder', (_name, value) => {
     expect(isAbsoluteDir(value)).toBe(false);
+  });
+});
+
+describe('the url of a job is checked the way IPC does (C1)', () => {
+  /** What the window may send and validateUrl takes: trimmed, then an http(s) link. */
+  const ACCEPTED_URLS: [string, string][] = [
+    ['a leading space', ' https://example.com/item'],
+    ['a trailing space', 'https://example.com/item '],
+    ['a trailing byte order mark', 'https://example.com/item\uFEFF'],
+    ['a leading byte order mark', '\uFEFFhttps://example.com/item'],
+    ['a leading non-breaking space', '\u00a0https://example.com/item'],
+    ['a trailing non-breaking space', 'https://example.com/item\u00a0'],
+    ['a non-breaking space right after the host', 'https://example.com\u00a0'],
+    ['an ideographic space right after the host', 'https://example.com\u3000'],
+    ['a line separator right after the host', 'https://example.com\u2028'],
+    ['marks and spaces on both sides', '\uFEFF \u00a0https://example.com/item \u00a0\uFEFF'],
+    ['line and paragraph separators', '\u2028https://example.com/item\u2029'],
+    ['ideographic spaces', '\u3000https://example.com/item\u3000'],
+    ['em spaces', '\u2003https://example.com/item\u2003'],
+    ['a tab and a newline at the edges', '\thttps://example.com/x\n'],
+    ['a vertical tab and a form feed at the edges', '\vhttps://example.com/x\f'],
+  ];
+
+  /** Nothing is left of these once trimmed, or what is left is not an http(s) link. */
+  const REJECTED_URLS: [string, string][] = [
+    ['a space', ' '],
+    ['a non-breaking space', '\u00a0'],
+    ['a byte order mark', '\uFEFF'],
+    ['spaces and marks only', ' \u00a0 \uFEFF '],
+    ['an empty text', ''],
+    ['a space and ftp', ' ftp://x'],
+    ['a mark and ftp', '\uFEFFftp://x'],
+    ['a trailing space after ftp', 'ftp://x '],
+    ['a file link with spaces', ' file:///C:/x '],
+    ['a script link after a non-breaking space', '\u00a0javascript:alert(1)'],
+    ['a scheme with no host', ' https:// '],
+    ['a link with no scheme', ' //example.com/x '],
+    ['a bare id with spaces', ' abc123 '],
+    ['a zero-width space, which trimming does not remove, before the link', '\u200bhttps://example.com/x'],
+  ];
+
+  it('loads a queued job whose url starts with a space, and returns the url as it was', () => {
+    expect(parseOne({ state: 'queued', url: ' https://example.com/item' })?.url).toBe(' https://example.com/item');
+  });
+
+  it('loads a queued job whose url ends in a byte order mark, and returns the url as it was', () => {
+    expect(parseOne({ state: 'queued', url: 'https://example.com/item\uFEFF' })?.url).toBe('https://example.com/item\uFEFF');
+  });
+
+  it.each(ACCEPTED_URLS)('loads a queued job whose url has %s, byte-identical', (_name, url) => {
+    const parsed = parseSnapshotFile(file({ state: 'queued', url }));
+    expect(parsed).not.toBeNull();
+    expect(parsed?.jobs[0]?.url).toBe(url);
+  });
+
+  it.each(['queued', 'probing', 'downloading', 'paused', 'merging', 'done', 'failed'] as const)('loads a %s job whose url has marks and spaces around it', (state) => {
+    const url = '\u00a0https://example.com/item\uFEFF';
+    const parsed = parseSnapshotFile(file({ state, url, fileName: state === 'done' ? 'a.mp4' : null }));
+    expect(parsed?.jobs[0]?.url).toBe(url);
+  });
+
+  it('loads a file job whose url has marks and spaces around it', () => {
+    const url = ' https://example.com/a.zip\uFEFF';
+    expect(parseSnapshotFile(file(fileJob({ url })))?.jobs[0]?.url).toBe(url);
+  });
+
+  it('loads a job of a group whose url has marks and spaces around it', () => {
+    const url = 'https://example.com/v/1\uFEFF';
+    const parsed = parseSnapshotFile({ version: 1, jobs: [oldJob({ groupId: 'g1', url, index: 1 })], groups: [group] });
+    expect(parsed?.jobs[0]?.url).toBe(url);
+  });
+
+  it('still rejects ` ` and ` ftp://x` on a queued job', () => {
+    expect(parseSnapshotFile(file({ state: 'queued', url: ' ' }))).toBeNull();
+    expect(parseSnapshotFile(file({ state: 'queued', url: ' ftp://x' }))).toBeNull();
+  });
+
+  it.each(REJECTED_URLS)('rejects a queued job whose url is %s', (_name, url) => {
+    expect(parseSnapshotFile(file({ state: 'queued', url }))).toBeNull();
+  });
+
+  it.each(['queued', 'probing', 'downloading', 'paused', 'merging', 'done', 'failed'] as const)('rejects a %s job whose url is only spaces or not http', (state) => {
+    const over = { state, fileName: state === 'done' ? 'a.mp4' : null };
+    for (const [name, url] of REJECTED_URLS) {
+      expect(parseSnapshotFile(file({ ...over, url })), name).toBeNull();
+    }
+  });
+
+  it('rejects a file job whose url is only spaces or not http', () => {
+    for (const [name, url] of REJECTED_URLS) {
+      expect(parseSnapshotFile(file(fileJob({ url }))), name).toBeNull();
+    }
+  });
+
+  it('still takes any string on a skipped job, spaces and marks included', () => {
+    for (const url of [' ', '\uFEFF', ' ftp://x', '\u00a0', 'abc123', '', ' https://example.com/item\uFEFF']) {
+      expect(parseOne({ state: 'skipped', reason: 'private', url })?.url, JSON.stringify(url)).toBe(url);
+    }
+  });
+
+  it('still rejects a url that is not a string, whatever its spaces', () => {
+    for (const url of [null, 5, undefined, {}, [' https://example.com/x']]) {
+      expect(parseSnapshotFile(file({ url })), String(url)).toBeNull();
+    }
+  });
+
+  it('accepts exactly what validateUrl, the check the window goes through, accepts', () => {
+    const urls = [
+      ...ACCEPTED_URLS.map(([, url]) => url),
+      ...REJECTED_URLS.map(([, url]) => url),
+      'https://example.com/a\u0000b',
+      'https://example.com/a\u001fb',
+      'https://example.com/a\u007fb',
+      '\u0000https://example.com/x',
+      'https://example.com/x\u0000',
+      'HTTPS://EXAMPLE.COM',
+      'http://localhost:8080/x',
+      'https://exa mple.com/x',
+      'https:example.com',
+      'https://example.com:99999/x',
+      'ws://example.com/x',
+      '  \t\n',
+      'https://example.com/\u00a0x',
+    ];
+    for (const url of urls) {
+      let windowAccepts = true;
+      try {
+        validateUrl(url);
+      } catch {
+        windowAccepts = false;
+      }
+      const loaderAccepts = parseSnapshotFile(file({ state: 'queued', url })) !== null;
+      expect(loaderAccepts, `the url ${JSON.stringify(url)}`).toBe(windowAccepts);
+    }
+  });
+
+  it('keeps the loader tolerant for old files: a control character inside a queued url still loads (C3)', () => {
+    for (const url of ['https://example.com/a\u0000b', 'https://example.com/a\u001fb', 'https://example.com/a\u007fb', 'https://example.com/a\tb']) {
+      expect(parseOne({ state: 'queued', url })?.url, JSON.stringify(url)).toBe(url);
+    }
+  });
+});
+
+describe('copyQuality (C2)', () => {
+  /** An extra key that cannot be written as JSON, or just does not belong. */
+  const circular = (): Record<string, unknown> => {
+    const o: Record<string, unknown> = { deep: 1 };
+    o['self'] = o;
+    return o;
+  };
+  const EXTRAS: [string, (q: Record<string, unknown>) => unknown][] = [
+    ['a bigint', () => 1n],
+    ['a circular object', () => circular()],
+    ['the quality itself', (q) => q],
+    ['text', () => 'x'],
+    ['undefined', () => undefined],
+    ['a nested object', () => ({ a: { b: 1 } })],
+  ];
+  const KINDS: [string, Record<string, unknown>, string[]][] = [
+    ['best', { kind: 'best' }, ['kind']],
+    ['max', { kind: 'max', height: 720 }, ['kind', 'height']],
+    ['audio', { kind: 'audio', format: 'mp3' }, ['kind', 'format']],
+  ];
+
+  const CLEAN: Quality[] = [
+    { kind: 'best' },
+    ...HEIGHTS.map((height): Quality => ({ kind: 'max', height })),
+    { kind: 'audio', format: 'm4a' },
+    { kind: 'audio', format: 'mp3' },
+  ];
+
+  it.each(CLEAN.map((q) => [JSON.stringify(q), q] as const))('returns a new object equal to %s', (_label, quality) => {
+    const copy = copyQuality(quality);
+    expect(copy).toStrictEqual(quality);
+    expect(copy).not.toBe(quality);
+  });
+
+  it.each(KINDS.flatMap(([kind, base, keys]) => EXTRAS.map(([extra, make]) => [kind, extra, base, make, keys] as const)))(
+    'rebuilds a %s quality that carries %s from its declared fields only',
+    (_kind, _extra, base, make, keys) => {
+      const quality: Record<string, unknown> = { ...base };
+      quality['extra'] = make(quality);
+      const copy = copyQuality(quality as unknown as Quality);
+      expect(copy).toStrictEqual(base);
+      expect(Object.keys(copy)).toEqual(keys);
+      expect(copy).not.toBe(quality);
+      expect(() => JSON.stringify(copy)).not.toThrow();
+    },
+  );
+
+  it.each([
+    ['best with the fields of the other kinds', { kind: 'best', height: 720, format: 'mp3' }, { kind: 'best' }],
+    ['max with the format of audio', { kind: 'max', height: 1080, format: 'm4a' }, { kind: 'max', height: 1080 }],
+    ['audio with the height of max', { kind: 'audio', format: 'mp3', height: 1080 }, { kind: 'audio', format: 'mp3' }],
+  ])('drops the fields of the other kinds: %s', (_name, sent, expected) => {
+    expect(copyQuality(sent as unknown as Quality)).toStrictEqual(expected);
+  });
+
+  it('builds a plain object, whatever the input was', () => {
+    class Odd {
+      kind = 'best' as const;
+      extra = 1n;
+    }
+    const copy = copyQuality(new Odd());
+    expect(Object.getPrototypeOf(copy)).toBe(Object.prototype);
+    expect(copy).toStrictEqual({ kind: 'best' });
+  });
+
+  it('does not share anything with its input', () => {
+    const quality: Quality = { kind: 'max', height: 720 };
+    const copy = copyQuality(quality);
+    (quality as { height: number }).height = 360;
+    expect(copy).toStrictEqual({ kind: 'max', height: 720 });
+    (copy as { height: number }).height = 480;
+    expect(quality.height).toBe(360);
+  });
+
+  it('gives a new object every time', () => {
+    const quality: Quality = { kind: 'best' };
+    expect(copyQuality(quality)).not.toBe(copyQuality(quality));
+  });
+
+  it('returns what isQuality accepts', () => {
+    for (const quality of CLEAN) expect(isQuality(copyQuality(quality))).toBe(true);
   });
 });
 

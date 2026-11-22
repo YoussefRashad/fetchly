@@ -124,6 +124,26 @@ export interface BinStatus {
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
 
+/**
+ * State of the download tools (B17).
+ * notInstalled: a tool is missing, no queue.
+ * starting: tools present, a start or restart is running (also the value before the first start).
+ * ready: the queue exists and aria2 runs.
+ * error: the start failed (no queue), or aria2 exited (the queue exists, file downloads
+ * cannot run); Retry applies.
+ */
+export type EngineStatus =
+  | { state: 'notInstalled' }
+  | { state: 'starting' }
+  | { state: 'ready' }
+  | { state: 'error'; message: string };
+
+export interface AppStatus {
+  engine: EngineStatus;
+  /** Text of the last failed write of jobs.json; null once a write succeeded. */
+  saveError: string | null;
+}
+
 /** What the window may ask the main process to do. Exposed as `window.hammel`. */
 export interface HammelApi {
   probe(url: string): Promise<Result<ProbeResult>>;
@@ -144,4 +164,12 @@ export interface HammelApi {
   updateYtDlp(): Promise<Result<string>>;
   /** A one-time message about something that happened at startup, or null. */
   startupNotice(): Promise<string | null>;
+  /** The state of the download tools and the last save error. */
+  status(): Promise<AppStatus>;
+  /** Called with the new status whenever it changes. Returns the function that stops listening. */
+  onStatus(cb: (s: AppStatus) => void): () => void;
+  /** Starts the download tools again after an error. */
+  retryEngines(): Promise<Result<null>>;
+  /** The user ended the leftover tool processes by hand: cut-off downloads may resume. */
+  confirmStraysGone(): Promise<Result<null>>;
 }

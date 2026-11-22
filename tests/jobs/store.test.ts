@@ -99,6 +99,100 @@ describe('Store', () => {
     });
   });
 
+  describe('a url with spaces or marks around it, as a file written by HEAD can hold (C1)', () => {
+    const URLS: [string, string][] = [
+      ['a leading space', ' https://example.com/item'],
+      ['a trailing byte order mark', 'https://example.com/item﻿'],
+      ['a leading byte order mark', '﻿https://example.com/item'],
+      ['a leading non-breaking space', ' https://example.com/item'],
+      ['a trailing non-breaking space', 'https://example.com/item '],
+      ['a non-breaking space right after the host', 'https://example.com '],
+      ['an ideographic space right after the host', 'https://example.com　'],
+      ['marks and spaces on both sides', '﻿  https://example.com/item  ﻿'],
+      ['line and paragraph separators', ' https://example.com/item '],
+      ['a tab and a newline at the edges', '\thttps://example.com/item\n'],
+    ];
+
+    it.each(URLS)('loads a hand-written jobs.json whose queued job has %s, with recoveredCorrupt null and the url unchanged', (_name, url) => {
+      const job = makeJob({ state: 'queued', url, title: 'Item', index: 1, groupId: 'g1' });
+      writeFileSync(join(dir, 'jobs.json'), previousFile({ ...job }).replace('"groups":[]', `"groups":${JSON.stringify([group])}`));
+      const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+      expect(recoveredCorrupt).toBeNull();
+      expect(readdirSync(dir).filter((f) => f.includes('.corrupt-'))).toEqual([]);
+      expect(snapshot.jobs).toEqual([{ ...job, interrupted: false, sourceHeight: null }]);
+      expect(snapshot.jobs[0]?.url).toBe(url);
+    });
+
+    it('loads the url of the plan, a leading space, from a file with no group', () => {
+      const job = makeJob({ state: 'queued', url: ' https://example.com/item' });
+      writeFileSync(join(dir, 'jobs.json'), previousFile({ ...job }));
+      const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs[0]?.url).toBe(' https://example.com/item');
+    });
+
+    it.each(['paused', 'downloading', 'failed', 'done'] as const)('loads such a url on a job saved as %s', (state) => {
+      const url = 'https://example.com/item﻿';
+      const job = makeJob({ state, url, fileName: state === 'done' ? 'a.mp4' : null, reason: state === 'failed' ? 'x' : null });
+      writeFileSync(join(dir, 'jobs.json'), previousFile({ ...job }));
+      const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs[0]?.url).toBe(url);
+    });
+
+    it('loads a file job with such a url', () => {
+      const url = ' https://example.com/a.zip﻿';
+      const job = makeJob({ kind: 'file', quality: null, baseName: null, fileName: 'a.zip', url, state: 'paused' });
+      writeFileSync(join(dir, 'jobs.json'), previousFile({ ...job }));
+      const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs[0]?.url).toBe(url);
+    });
+
+    it('keeps the url byte-identical across a save and a load', () => {
+      const url = ' https://example.com/item﻿';
+      const store = new Store(dir, DOWNLOADS);
+      store.saveSnapshot({ jobs: [makeJob({ state: 'queued', url })], groups: [] });
+      const first = new Store(dir, DOWNLOADS).load();
+      expect(first.recoveredCorrupt).toBeNull();
+      expect(first.snapshot.jobs[0]?.url).toBe(url);
+      store.saveSnapshot(first.snapshot);
+      expect(new Store(dir, DOWNLOADS).load().snapshot.jobs[0]?.url).toBe(url);
+    });
+
+    it.each([
+      ['a space', ' '],
+      ['a space and ftp', ' ftp://x'],
+      ['a non-breaking space', ' '],
+      ['a mark and ftp', '﻿ftp://x'],
+      ['a zero-width space before the link', '​https://example.com/x'],
+    ])('still sets the list aside when a queued job has %s as its url', (_name, url) => {
+      const content = previousFile({ ...makeJob({ state: 'queued', url }) });
+      writeFileSync(join(dir, 'jobs.json'), content);
+      const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+      expect(snapshot.jobs).toEqual([]);
+      expect(recoveredCorrupt).not.toBeNull();
+      expect(readFileSync(recoveredCorrupt as string, 'utf8')).toBe(content);
+    });
+
+    it('still takes any string as the url of a skipped placeholder', () => {
+      const jobs = [' ', '﻿', ' ftp://x', ''].map((url, i) => makeJob({ id: `s${i}`, state: 'skipped', reason: 'private', url }));
+      new Store(dir, DOWNLOADS).saveSnapshot({ jobs, groups: [] });
+      const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs.map((j) => j.url)).toEqual([' ', '﻿', ' ftp://x', '']);
+    });
+
+    it('keeps the loader tolerant for old files: a control character inside a url still loads (C3)', () => {
+      for (const url of ['https://example.com/a\u0000b', 'https://example.com/a\u001fb', 'https://example.com/a\u007fb']) {
+        writeFileSync(join(dir, 'jobs.json'), previousFile({ ...makeJob({ state: 'queued', url }) }));
+        const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+        expect(recoveredCorrupt, JSON.stringify(url)).toBeNull();
+        expect(snapshot.jobs[0]?.url, JSON.stringify(url)).toBe(url);
+      }
+    });
+  });
+
   describe('meters never set the list aside (A3)', () => {
     it('loads a file of the previous version with eta -5 and actualHeight 0, both as null', () => {
       const running = { ...makeJob({ id: 'a', state: 'paused', bytesDone: 10 }), eta: -5 };

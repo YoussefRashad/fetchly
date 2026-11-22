@@ -64,8 +64,8 @@ export interface QueueDeps {
   file: Engine & { setRateLimit(jobId: string, bytesPerSec: number | null): Promise<void> };
   initial: Snapshot;
   settings: Settings;
-  /** true = the check for tool processes left by an earlier run succeeded, so no job is cut off. Default true. */
-  straysCleared?: boolean;
+  /** true = the check for tool processes left by an earlier run succeeded, so no job is cut off. */
+  straysCleared: boolean;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
 }
@@ -113,7 +113,7 @@ export class Queue {
     this.media = deps.media;
     this.file = deps.file;
     this.jobs = [...deps.initial.jobs];
-    if (deps.straysCleared ?? true) this.jobs = this.jobs.map((j) => (j.interrupted ? { ...j, interrupted: false } : j));
+    if (deps.straysCleared) this.jobs = this.jobs.map((j) => (j.interrupted ? { ...j, interrupted: false } : j));
     this.groups = [...deps.initial.groups];
     this.settings = deps.settings;
     this.now = deps.now ?? Date.now;

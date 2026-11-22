@@ -1,15 +1,15 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Engine } from '../src/main/engines/engine';
-import { createHandlers, type HandlerDeps } from '../src/main/ipc';
+import { createHandlers, type Handlers, type HandlerDeps } from '../src/main/ipc';
 import { Queue } from '../src/main/jobs/queue';
 import { ACTIVE } from '../src/main/jobs/state';
 import { Store } from '../src/main/jobs/store';
-import { InvalidUrl, ProbeError } from '../src/main/probe';
+import { InvalidUrl, ProbeError, validateUrl as realValidateUrl } from '../src/main/probe';
 import { parseProbe } from '../src/main/ytdlp/parse';
-import type { AddRequest, GroupVerb, Job, JobVerb, ProbeResult, Settings, Snapshot } from '../src/shared/types';
+import type { AddRequest, EngineStatus, GroupVerb, Job, JobVerb, ProbeResult, Quality, Result, Settings, Snapshot } from '../src/shared/types';
 import { makeJob, makeSettings } from './helpers';
 
 let dir: string;
@@ -22,9 +22,21 @@ let queueSettings: Settings[];
 let opened: string[];
 let shown: string[];
 let probeImpl: (url: string) => Promise<ProbeResult>;
+let probed: string[];
 let queueReady: boolean;
 let installed: number;
 let installFails: boolean;
+/** The engine status the fake host reports (9.3). */
+let engine: EngineStatus;
+let saveError: string | null;
+/** What the fake queue answers to job() and group(). */
+let verbResult: Result<null>;
+let confirmed: number;
+let retries: number;
+/** What the fake host does when the window asks to retry. */
+let retryImpl: () => Promise<void>;
+/** What the fake afterInstall does besides counting. */
+let afterInstallImpl: () => Promise<void>;
 
 const media: ProbeResult = { kind: 'media', title: 'Talk', thumbnail: null, heights: [1080] };
 const list: ProbeResult = {
@@ -42,12 +54,24 @@ function deps(): HandlerDeps {
       queueReady
         ? {
             add: (r) => added.push(r),
-            job: async (id, verb) => void verbs.push([id, verb]),
-            group: async (id, verb) => void verbs.push([id, verb]),
+            job: async (id, verb) => {
+              verbs.push([id, verb]);
+              return verbResult;
+            },
+            group: async (id, verb) => {
+              verbs.push([id, verb]);
+              return verbResult;
+            },
+            confirmStraysGone: () => void (confirmed += 1),
             snapshot: () => snapshot,
             setSettings: (s) => queueSettings.push(s),
           }
         : null,
+    status: () => ({ engine, saveError }),
+    retryEngines: async () => {
+      retries += 1;
+      await retryImpl();
+    },
     getSettings: () => settings,
     saveSettings: (s) => {
       settings = s;
@@ -57,7 +81,10 @@ function deps(): HandlerDeps {
       if (!raw.trim().startsWith('http')) throw new InvalidUrl();
       return raw.trim();
     },
-    probe: (url) => probeImpl(url),
+    probe: (url) => {
+      probed.push(url);
+      return probeImpl(url);
+    },
     binaries: {
       status: async () => [{ name: 'yt-dlp', installed: true, version: '1' }],
       ensureAll: async (onProgress) => {
@@ -67,7 +94,10 @@ function deps(): HandlerDeps {
       updateYtDlp: async () => '2026.11.01',
     },
     onInstallProgress: () => undefined,
-    afterInstall: async () => void (installed += 1),
+    afterInstall: async () => {
+      installed += 1;
+      await afterInstallImpl();
+    },
     pickFolder: async () => 'D:\\Picked',
     openPath: async (p) => void opened.push(p),
     showItem: (p) => void shown.push(p),
@@ -96,9 +126,17 @@ beforeEach(() => {
   opened = [];
   shown = [];
   probeImpl = async () => media;
+  probed = [];
   queueReady = true;
   installed = 0;
   installFails = false;
+  engine = { state: 'ready' };
+  saveError = null;
+  verbResult = { ok: true, value: null };
+  confirmed = 0;
+  retries = 0;
+  retryImpl = async () => undefined;
+  afterInstallImpl = async () => undefined;
 });
 
 describe('probe', () => {
@@ -189,6 +227,7 @@ describe('add', () => {
 
   it('says so when the download tools are not installed yet', async () => {
     queueReady = false;
+    engine = { state: 'notInstalled' };
     expect(await createHandlers(deps()).add(request())).toEqual({ ok: false, error: 'Install the download tools first' });
   });
 });
@@ -613,7 +652,7 @@ describe('add accepts what parseProbe returns (B3)', () => {
   });
 });
 
-/** The fake engines of the queue specs; the file engine carries both limit calls from the start. */
+/** The fake engines of the queue specs. */
 class FakeEngine implements Engine {
   started: Job[] = [];
   on(): void {
@@ -626,9 +665,6 @@ class FakeEngine implements Engine {
     return;
   }
   async discard(): Promise<void> {
-    return;
-  }
-  async setGlobalLimit(): Promise<void> {
     return;
   }
   async setRateLimit(): Promise<void> {
@@ -675,6 +711,7 @@ describe('what add accepts loads again from disk', () => {
       file: new FakeEngine(),
       initial: { jobs: [], groups: [] },
       settings: makeSettings({ downloadDir: dir }),
+      straysCleared: true,
       setTimer: () => undefined,
     });
     const handlers = createHandlers({ ...deps(), queue: () => queue });
@@ -699,6 +736,7 @@ describe('what add accepts loads again from disk', () => {
       file: new FakeEngine(),
       initial: { jobs: [], groups: [] },
       settings: makeSettings({ downloadDir: dir }),
+      straysCleared: true,
       setTimer: () => undefined,
     });
     await createHandlers({ ...deps(), queue: () => queue }).add(listRequest(placeholders()));
@@ -742,6 +780,7 @@ describe('add refuses an array with a hole and leaves the real queue and its fil
       file: new FakeEngine(),
       initial: { jobs: [], groups: [] },
       settings: makeSettings({ downloadDir: dir }),
+      straysCleared: true,
       setTimer: () => undefined,
     });
     const handlers = createHandlers({ ...deps(), queue: () => queue });
@@ -879,6 +918,834 @@ describe('download tools', () => {
 
   it('passes the startup notice on', async () => {
     expect(await createHandlers(deps()).startupNotice()).toBe('jobs.json.corrupt-1');
+  });
+});
+
+const INSTALL_TEXT = 'Install the download tools first';
+const STARTING_TEXT = 'The download tools are still starting';
+const INVALID_URL_TEXT = 'Enter a link that starts with http:// or https://';
+const START_FAILED: EngineStatus = { state: 'error', message: 'The download tools could not be started: spawn aria2c ENOENT' };
+const SERVICE_STOPPED: EngineStatus = { state: 'error', message: 'The file download service stopped' };
+const READY: EngineStatus = { state: 'ready' };
+
+/** Every engine status a window can meet, and the text a handler answers when the status has no queue behind it. */
+const NO_QUEUE: [string, EngineStatus, string][] = [
+  ['notInstalled', { state: 'notInstalled' }, INSTALL_TEXT],
+  ['starting', { state: 'starting' }, STARTING_TEXT],
+  ['error after a failed start', START_FAILED, 'The download tools could not be started: spawn aria2c ENOENT'],
+  ['error after an aria2 exit', SERVICE_STOPPED, 'The file download service stopped'],
+];
+
+/** The four handlers that need a queue. */
+const NEEDS_A_QUEUE: [string, (h: Handlers) => Promise<Result<null>>][] = [
+  ['add', (h) => h.add(request())],
+  ['job', (h) => h.job('j1', 'pause')],
+  ['group', (h) => h.group('g1', 'pause')],
+  ['confirmStraysGone', (h) => h.confirmStraysGone()],
+];
+
+const flushPromises = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+/** U+0000-U+001F and U+007F: what C3 keeps out of a link. */
+const CONTROL_CODES: number[] = [...Array.from({ length: 0x20 }, (_, i) => i), 0x7f];
+const codeLabel = (code: number): string => `U+${code.toString(16).toUpperCase().padStart(4, '0')}`;
+const chr = (code: number): string => String.fromCharCode(code);
+
+function circular(): Record<string, unknown> {
+  const o: Record<string, unknown> = { deep: 1 };
+  o['self'] = o;
+  return o;
+}
+
+/** Every kind of Quality, as the window sends it and as it must come out. */
+const KINDS: [string, Record<string, unknown>, Quality][] = [
+  ['best', { kind: 'best' }, { kind: 'best' }],
+  ['max', { kind: 'max', height: 720 }, { kind: 'max', height: 720 }],
+  ['audio', { kind: 'audio', format: 'mp3' }, { kind: 'audio', format: 'mp3' }],
+];
+
+/** An extra key a window could send: it may not be writable as JSON, or it just does not belong. */
+const EXTRAS: [string, (q: Record<string, unknown>) => unknown][] = [
+  ['a bigint', () => 1n],
+  ['a circular object', () => circular()],
+  ['the quality itself', (q) => q],
+  ['text', () => 'x'],
+  ['a nested object', () => ({ a: { b: 1 } })],
+  ['undefined', () => undefined],
+];
+
+function withExtra(base: Record<string, unknown>, make: (q: Record<string, unknown>) => unknown): Record<string, unknown> {
+  const quality: Record<string, unknown> = { ...base };
+  quality['extra'] = make(quality);
+  return quality;
+}
+
+/** One row per kind and per extra: the kind, the extra, the base, the extra's maker, what must come out. */
+const QUALITY_ROWS = KINDS.flatMap(([kind, base, declared]) => EXTRAS.map(([extra, make]) => [kind, extra, base, make, declared] as const));
+
+describe('job and group results (9.3)', () => {
+  const JOB_VERBS_ALL: JobVerb[] = ['pause', 'resume', 'cancel', 'retry', 'remove', 'removeWithFile'];
+  const GROUP_VERBS_ALL: GroupVerb[] = ['pause', 'resume', 'cancel'];
+
+  it('passes on why a verb failed', async () => {
+    verbResult = { ok: false, error: 'x' };
+    const h = createHandlers(deps());
+    expect(await h.job('j1', 'pause')).toEqual({ ok: false, error: 'x' });
+    expect(await h.group('g1', 'cancel')).toEqual({ ok: false, error: 'x' });
+  });
+
+  it.each(JOB_VERBS_ALL)('passes on a failed job verb %s with its own text', async (verb) => {
+    verbResult = { ok: false, error: `could not ${verb}: the download did not stop` };
+    expect(await createHandlers(deps()).job('j1', verb)).toEqual({ ok: false, error: `could not ${verb}: the download did not stop` });
+    expect(verbs).toEqual([['j1', verb]]);
+  });
+
+  it.each(GROUP_VERBS_ALL)('passes on a failed group verb %s with its own text', async (verb) => {
+    verbResult = { ok: false, error: `could not ${verb}: the download did not stop` };
+    expect(await createHandlers(deps()).group('g1', verb)).toEqual({ ok: false, error: `could not ${verb}: the download did not stop` });
+    expect(verbs).toEqual([['g1', verb]]);
+  });
+
+  it('passes on the text of a queue that is closing', async () => {
+    verbResult = { ok: false, error: 'Hammel is closing' };
+    expect(await createHandlers(deps()).job('j1', 'resume')).toEqual({ ok: false, error: 'Hammel is closing' });
+  });
+
+  it.each(JOB_VERBS_ALL)('answers ok for a job verb %s that worked', async (verb) => {
+    expect(await createHandlers(deps()).job('j1', verb)).toEqual({ ok: true, value: null });
+  });
+
+  it.each(GROUP_VERBS_ALL)('answers ok for a group verb %s that worked', async (verb) => {
+    expect(await createHandlers(deps()).group('g1', verb)).toEqual({ ok: true, value: null });
+  });
+
+  it('does not turn a failed result into ok because the queue answered', async () => {
+    const h = createHandlers(deps());
+    verbResult = { ok: false, error: 'first' };
+    expect(await h.job('j1', 'pause')).toMatchObject({ ok: false });
+    verbResult = { ok: true, value: null };
+    expect(await h.job('j1', 'pause')).toMatchObject({ ok: true });
+    verbResult = { ok: false, error: 'second' };
+    expect(await h.group('g1', 'pause')).toEqual({ ok: false, error: 'second' });
+  });
+
+  it('still never throws across the boundary when the queue itself throws', async () => {
+    const throwing = { ...deps(), queue: () => ({ add: () => undefined, job: async () => Promise.reject(new Error('boom')), group: async () => Promise.reject(new Error('boom')), confirmStraysGone: () => undefined, snapshot: () => snapshot, setSettings: () => undefined }) };
+    const h = createHandlers(throwing);
+    expect(await h.job('j1', 'pause')).toEqual({ ok: false, error: 'Something went wrong: boom' });
+    expect(await h.group('g1', 'pause')).toEqual({ ok: false, error: 'Something went wrong: boom' });
+  });
+});
+
+describe('without a queue the handlers say why (9.3)', () => {
+  it('reports the start error instead of asking to install', async () => {
+    queueReady = false;
+    const h = createHandlers(deps());
+    engine = START_FAILED;
+    expect(await h.add(request())).toEqual({ ok: false, error: 'The download tools could not be started: spawn aria2c ENOENT' });
+    engine = { state: 'starting' };
+    expect(await h.add(request())).toEqual({ ok: false, error: 'The download tools are still starting' });
+    engine = { state: 'notInstalled' };
+    expect(await h.add(request())).toEqual({ ok: false, error: 'Install the download tools first' });
+  });
+
+  it.each(NEEDS_A_QUEUE.flatMap(([handler, run]) => NO_QUEUE.map(([state, status, text]) => [handler, state, run, status, text] as const)))(
+    '%s answers the status text while the engine is %s',
+    async (_handler, _state, run, status, text) => {
+      queueReady = false;
+      engine = status;
+      expect(await run(createHandlers(deps()))).toEqual({ ok: false, error: text });
+      expect(added).toEqual([]);
+      expect(verbs).toEqual([]);
+      expect(confirmed).toBe(0);
+    },
+  );
+
+  it.each(NEEDS_A_QUEUE)('%s reads the status again on every call', async (_handler, run) => {
+    queueReady = false;
+    const h = createHandlers(deps());
+    for (const [, status, text] of [...NO_QUEUE, ...[...NO_QUEUE].reverse()]) {
+      engine = status;
+      expect(await run(h), text).toEqual({ ok: false, error: text });
+    }
+  });
+
+  it('does not make the download folder when there is no queue', async () => {
+    queueReady = false;
+    engine = { state: 'starting' };
+    const target = join(dir, 'new', 'deep');
+    expect(await createHandlers(deps()).add(request({ dir: target }))).toEqual({ ok: false, error: STARTING_TEXT });
+    expect(existsSync(target)).toBe(false);
+    expect(probed).toEqual([]);
+  });
+
+  it.each([
+    ['notInstalled', { state: 'notInstalled' }],
+    ['starting', { state: 'starting' }],
+    ['ready', READY],
+    ['error after a failed start', START_FAILED],
+    ['error after an aria2 exit', SERVICE_STOPPED],
+  ] as [string, EngineStatus][])('with a queue every handler works while the engine is %s', async (_state, status) => {
+    engine = status;
+    const h = createHandlers(deps());
+    expect(await h.add(request())).toEqual(ACCEPTED);
+    expect(await h.job('j1', 'pause')).toEqual(ACCEPTED);
+    expect(await h.group('g1', 'resume')).toEqual(ACCEPTED);
+    expect(await h.confirmStraysGone()).toEqual(ACCEPTED);
+    expect(added).toHaveLength(1);
+    expect(verbs).toEqual([
+      ['j1', 'pause'],
+      ['g1', 'resume'],
+    ]);
+    expect(confirmed).toBe(1);
+  });
+
+  it('does not need a queue to probe, to read settings or to show the snapshot', async () => {
+    queueReady = false;
+    engine = { state: 'notInstalled' };
+    const h = createHandlers(deps());
+    expect(await h.probe('https://example.com/v')).toEqual({ ok: true, value: media });
+    expect(await h.getSettings()).toBe(settings);
+    expect(await h.snapshot()).toEqual({ jobs: [], groups: [] });
+  });
+});
+
+describe('status, retryEngines and confirmStraysGone (9.3)', () => {
+  const ENGINES: [string, EngineStatus][] = [
+    ['notInstalled', { state: 'notInstalled' }],
+    ['starting', { state: 'starting' }],
+    ['ready', READY],
+    ['error', START_FAILED],
+    ['error after an aria2 exit', SERVICE_STOPPED],
+  ];
+  const SAVE_ERRORS: [string, string | null][] = [
+    ['no save error', null],
+    ['a save error', 'could not save the download list: EACCES: permission denied'],
+  ];
+
+  it.each(ENGINES.flatMap(([name, status]) => SAVE_ERRORS.map(([label, error]) => [name, label, status, error] as const)))(
+    'status returns the engine state and the save error: %s, %s',
+    async (_engine, _label, status, error) => {
+      engine = status;
+      saveError = error;
+      expect(await createHandlers(deps()).status()).toStrictEqual({ engine: status, saveError: error });
+    },
+  );
+
+  it('status answers with or without a queue', async () => {
+    engine = START_FAILED;
+    saveError = 'could not save the download list: disk full';
+    for (const ready of [true, false]) {
+      queueReady = ready;
+      expect(await createHandlers(deps()).status()).toStrictEqual({ engine: START_FAILED, saveError: 'could not save the download list: disk full' });
+    }
+  });
+
+  it('status follows the engine and the save error as they change', async () => {
+    const h = createHandlers(deps());
+    expect(await h.status()).toStrictEqual({ engine: READY, saveError: null });
+    engine = SERVICE_STOPPED;
+    expect(await h.status()).toStrictEqual({ engine: SERVICE_STOPPED, saveError: null });
+    saveError = 'could not save the download list: disk full';
+    expect(await h.status()).toStrictEqual({ engine: SERVICE_STOPPED, saveError: 'could not save the download list: disk full' });
+    engine = READY;
+    saveError = null;
+    expect(await h.status()).toStrictEqual({ engine: READY, saveError: null });
+  });
+
+  describe('retryEngines calls the host and answers by the status afterwards', () => {
+    const AFTER: [string, EngineStatus, Result<null>][] = [
+      ['ready', READY, { ok: true, value: null }],
+      ['error', { state: 'error', message: 'The download tools could not be started: port in use' }, { ok: false, error: 'The download tools could not be started: port in use' }],
+      ['error after an aria2 exit', SERVICE_STOPPED, { ok: false, error: 'The file download service stopped' }],
+      ['starting', { state: 'starting' }, { ok: false, error: STARTING_TEXT }],
+      ['notInstalled', { state: 'notInstalled' }, { ok: false, error: INSTALL_TEXT }],
+    ];
+
+    it.each(AFTER)('the status afterwards is %s', async (_name, after, expected) => {
+      engine = SERVICE_STOPPED;
+      retryImpl = async () => {
+        engine = after;
+      };
+      expect(await createHandlers(deps()).retryEngines()).toEqual(expected);
+      expect(retries).toBe(1);
+    });
+
+    it('answers ok when the engines were ready already and stay ready', async () => {
+      expect(await createHandlers(deps()).retryEngines()).toEqual({ ok: true, value: null });
+      expect(retries).toBe(1);
+    });
+
+    it('does not answer ok because of the status from before the call', async () => {
+      engine = READY;
+      retryImpl = async () => {
+        engine = START_FAILED;
+      };
+      expect(await createHandlers(deps()).retryEngines()).toEqual({ ok: false, error: 'The download tools could not be started: spawn aria2c ENOENT' });
+    });
+
+    it('waits for the host before it answers', async () => {
+      let finish: () => void = () => undefined;
+      retryImpl = () =>
+        new Promise<void>((resolve) => {
+          finish = () => {
+            engine = READY;
+            resolve();
+          };
+        });
+      engine = SERVICE_STOPPED;
+      let answer: Result<null> | null = null;
+      const pending = createHandlers(deps())
+        .retryEngines()
+        .then((r) => {
+          answer = r;
+        });
+      await flushPromises();
+      expect(retries).toBe(1);
+      expect(answer).toBeNull();
+      finish();
+      await pending;
+      expect(answer).toEqual({ ok: true, value: null });
+    });
+
+    it('calls the host once for every click', async () => {
+      const h = createHandlers(deps());
+      await h.retryEngines();
+      await h.retryEngines();
+      expect(retries).toBe(2);
+    });
+
+    it('works with a queue and without one', async () => {
+      for (const ready of [true, false]) {
+        queueReady = ready;
+        retries = 0;
+        expect(await createHandlers(deps()).retryEngines()).toEqual({ ok: true, value: null });
+        expect(retries).toBe(1);
+      }
+    });
+  });
+
+  describe('confirmStraysGone', () => {
+    it('confirmStraysGone calls the queue', async () => {
+      const h = createHandlers(deps());
+      expect(await h.confirmStraysGone()).toEqual({ ok: true, value: null });
+      expect(confirmed).toBe(1);
+      expect(await h.confirmStraysGone()).toEqual({ ok: true, value: null });
+      expect(confirmed).toBe(2);
+    });
+
+    it.each(NO_QUEUE)('fails with the status text when there is no queue: %s', async (_name, status, text) => {
+      queueReady = false;
+      engine = status;
+      expect(await createHandlers(deps()).confirmStraysGone()).toEqual({ ok: false, error: text });
+      expect(confirmed).toBe(0);
+    });
+  });
+
+  describe('installBinaries reports an engine start error', () => {
+    it('answers the message when afterInstall leaves the status at error', async () => {
+      afterInstallImpl = async () => {
+        engine = START_FAILED;
+      };
+      expect(await createHandlers(deps()).installBinaries()).toEqual({
+        ok: false,
+        error: 'The download tools could not be started: spawn aria2c ENOENT',
+      });
+      expect(installed).toBe(1);
+    });
+
+    it.each([
+      ['ready', READY],
+      ['starting', { state: 'starting' }],
+      ['notInstalled', { state: 'notInstalled' }],
+    ] as [string, EngineStatus][])('answers ok when the status after afterInstall is %s', async (_name, after) => {
+      afterInstallImpl = async () => {
+        engine = after;
+      };
+      expect(await createHandlers(deps()).installBinaries()).toEqual({ ok: true, value: null });
+    });
+
+    it('reads the status after afterInstall, not before', async () => {
+      engine = START_FAILED;
+      afterInstallImpl = async () => {
+        engine = READY;
+      };
+      expect(await createHandlers(deps()).installBinaries()).toEqual({ ok: true, value: null });
+    });
+
+    it('answers the message of an aria2 that stopped as well', async () => {
+      afterInstallImpl = async () => {
+        engine = SERVICE_STOPPED;
+      };
+      expect(await createHandlers(deps()).installBinaries()).toEqual({ ok: false, error: 'The file download service stopped' });
+    });
+
+    it('still reports a failed download as it did, and does not look at the engine', async () => {
+      installFails = true;
+      engine = START_FAILED;
+      expect(await createHandlers(deps()).installBinaries()).toEqual({ ok: false, error: 'could not download ffmpeg: server answered 404' });
+      expect(installed).toBe(0);
+    });
+  });
+});
+
+/** The real Queue and Store of the round-trip specs, behind the real handlers. */
+const REAL_DOWNLOADS = 'C:\\Users\\me\\Downloads';
+
+/** What a load does to a job found running: paused, no speed, no eta, cut off. */
+const asLoaded = (j: Job): Job => (ACTIVE.has(j.state) ? { ...j, state: 'paused', speed: 0, eta: null, interrupted: true } : j);
+
+describe('with the real handlers, Queue and Store (C1, C2, C3)', () => {
+  let realData: string;
+
+  beforeEach(() => {
+    realData = mkdtempSync(join(tmpdir(), 'hammel-ipc-real-'));
+  });
+  afterEach(() => {
+    rmSync(realData, { recursive: true, force: true });
+  });
+
+  function real(over: Partial<HandlerDeps> = {}) {
+    const store = new Store(realData, REAL_DOWNLOADS);
+    const saves = vi.spyOn(store, 'saveSnapshot'); // it still calls the real Store
+    const queue = new Queue({
+      store,
+      media: new FakeEngine(),
+      file: new FakeEngine(),
+      initial: { jobs: [], groups: [] },
+      settings: makeSettings({ downloadDir: dir }),
+      straysCleared: true,
+      setTimer: () => undefined,
+    });
+    const saveErrors: (string | null)[] = [];
+    queue.onSaveState((e) => saveErrors.push(e));
+    const handlers = createHandlers({ ...deps(), queue: () => queue, saveSettings: (s) => store.saveSettings(s), ...over });
+    return { store, saves, queue, handlers, saveErrors };
+  }
+
+  const reload = () => new Store(realData, REAL_DOWNLOADS).load();
+
+  describe('C1: the loader checks a url the way IPC does', () => {
+    const ITEM_URLS: [string, string][] = [
+      ['a leading space', ' https://example.com/item'],
+      ['a trailing space', 'https://example.com/item '],
+      ['a trailing byte order mark', 'https://example.com/item\uFEFF'],
+      ['a leading byte order mark', '\uFEFFhttps://example.com/item'],
+      ['a leading non-breaking space', '\u00a0https://example.com/item'],
+      ['a trailing non-breaking space', 'https://example.com/item\u00a0'],
+      ['a non-breaking space right after the host', 'https://example.com\u00a0'],
+      ['an ideographic space right after the host', 'https://example.com\u3000'],
+      ['marks and spaces on both sides', '\uFEFF https://example.com/item \uFEFF'],
+      ['line and paragraph separators', '\u2028https://example.com/item\u2029'],
+      ['ideographic spaces', '\u3000https://example.com/item\u3000'],
+      ['a tab and a newline at the edges', '\thttps://example.com/item\n'],
+    ];
+
+    it.each(ITEM_URLS)('a playlist whose available entry has %s reloads with recoveredCorrupt null and the same url', async (_name, url) => {
+      const h = real({ validateUrl: realValidateUrl });
+      const entries = [entryOf({ index: 1, url, title: 'One' }), entryOf({ index: 2, url: 'https://example.com/v/2', title: 'Two' })];
+      expect(await h.handlers.add(listRequest(entries))).toEqual(ACCEPTED);
+      const inQueue = h.queue.snapshot();
+      expect(inQueue.jobs.find((j) => j.index === 1)?.url).toBe(url);
+      const { snapshot, recoveredCorrupt } = reload();
+      expect(recoveredCorrupt).toBeNull();
+      expect(readdirSync(realData).filter((f) => f.includes('.corrupt-'))).toEqual([]);
+      expect(snapshot.jobs.find((j) => j.index === 1)?.url).toBe(url);
+      expect(snapshot.jobs).toEqual(inQueue.jobs.map(asLoaded));
+      expect(snapshot.groups).toEqual(inQueue.groups);
+    });
+
+    it('does the same with the validator of these specs', async () => {
+      const h = real();
+      const url = 'https://example.com/item\uFEFF';
+      expect(await h.handlers.add(listRequest([entryOf({ index: 1, url }), entryOf({ index: 2, url: 'https://example.com/v/2' })]))).toEqual(ACCEPTED);
+      const { snapshot, recoveredCorrupt } = reload();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs.find((j) => j.index === 1)?.url).toBe(url);
+    });
+
+    it.each(ITEM_URLS)('a single link with %s is added trimmed and reloads', async (_name, url) => {
+      const h = real({ validateUrl: realValidateUrl });
+      expect(await h.handlers.add(request({ url }))).toEqual(ACCEPTED);
+      const { snapshot, recoveredCorrupt } = reload();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs).toHaveLength(1);
+      expect(snapshot.jobs[0]?.url).toBe(url.trim());
+    });
+
+    it('keeps the placeholders of a playlist next to such an entry', async () => {
+      const h = real({ validateUrl: realValidateUrl });
+      const url = '\u00a0https://example.com/item\uFEFF';
+      await h.handlers.add(listRequest([entryOf({ index: 1, url }), entryOf({ index: 2, url: '', unavailable: true, reason: 'private' }), entryOf({ index: 3, url: 'abc123', unavailable: true, reason: 'removed' })]));
+      const { snapshot, recoveredCorrupt } = reload();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs.map((j) => [j.index, j.url, j.state === 'skipped'])).toEqual([
+        [1, url, false],
+        [2, '', true],
+        [3, 'abc123', true],
+      ]);
+    });
+  });
+
+  describe('C2: quality is rebuilt before it leaves IPC', () => {
+    it.each(QUALITY_ROWS)('an add whose %s quality carries %s answers ok, a second add saves too, and a reload shows both jobs', async (_kind, _extra, base, make, declared) => {
+      const h = real();
+      const bad = withExtra(base, make) as unknown as Quality;
+      expect(await h.handlers.add(request({ quality: bad }))).toEqual(ACCEPTED);
+      const savesAfterFirst = h.saves.mock.calls.length;
+      expect(await h.handlers.add(request({ url: 'https://example.com/second', quality: { kind: 'best' } }))).toEqual(ACCEPTED);
+      expect(h.saves.mock.calls.length).toBeGreaterThan(savesAfterFirst);
+      expect(h.saveErrors).toEqual([null]); // no save ever failed
+
+      const { snapshot, recoveredCorrupt } = reload();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs).toHaveLength(2);
+      expect(snapshot.jobs.map((j) => j.quality)).toStrictEqual([declared, { kind: 'best' }]);
+      expect(snapshot.jobs).toEqual(h.queue.snapshot().jobs.map(asLoaded));
+    });
+
+    it.each(QUALITY_ROWS)('a second add with the same %s quality and %s also saves', async (_kind, _extra, base, make, declared) => {
+      const h = real();
+      expect(await h.handlers.add(request({ quality: withExtra(base, make) as unknown as Quality }))).toEqual(ACCEPTED);
+      expect(await h.handlers.add(request({ url: 'https://example.com/second', quality: withExtra(base, make) as unknown as Quality }))).toEqual(ACCEPTED);
+      expect(h.saveErrors).toEqual([null]);
+      const { snapshot, recoveredCorrupt } = reload();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs.map((j) => j.quality)).toStrictEqual([declared, declared]);
+    });
+
+    it.each(QUALITY_ROWS)('a playlist whose %s quality carries %s is saved and reloads', async (_kind, _extra, base, make, declared) => {
+      const h = real();
+      const req = { ...listRequest([entryOf({ index: 1 }), entryOf({ index: 2, url: 'https://example.com/v/2' })]), quality: withExtra(base, make) as unknown as Quality };
+      expect(await h.handlers.add(req)).toEqual(ACCEPTED);
+      expect(h.saveErrors).toEqual([null]);
+      const { snapshot, recoveredCorrupt } = reload();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs.map((j) => j.quality)).toStrictEqual([declared, declared]);
+    });
+
+    it('a file add with a junk quality saves no quality at all', async () => {
+      const h = real();
+      const req = { ...fileRequest(), quality: { kind: 'best', extra: 1n } as unknown as Quality };
+      expect(await h.handlers.add(req)).toEqual(ACCEPTED);
+      expect(h.saveErrors).toEqual([null]);
+      const { snapshot, recoveredCorrupt } = reload();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs.map((j) => j.quality)).toEqual([null]);
+    });
+
+    it.each(QUALITY_ROWS)('setSettings with a %s default quality that carries %s saves through the real Store', async (_kind, _extra, base, make, declared) => {
+      const h = real();
+      const res = await h.handlers.setSettings(makeSettings({ downloadDir: dir, defaultQuality: withExtra(base, make) as unknown as Quality }));
+      expect(res).toMatchObject({ ok: true });
+      expect(h.saveErrors).toEqual([null]);
+      const loaded = reload();
+      expect(loaded.settings.defaultQuality).toStrictEqual(declared);
+      expect(loaded.settings).toStrictEqual({ ...makeSettings({ downloadDir: dir }), defaultQuality: declared });
+    });
+  });
+
+  describe('C3: a url with a control character never reaches the queue or a spawn', () => {
+    const REFUSED_REAL: [string, () => AddRequest, unknown][] = [
+      ['a url with a NUL', () => request({ url: 'https://example.com/a\u0000b' }), { ok: false, error: INVALID_URL_TEXT }],
+      ['a url with U+001F', () => request({ url: 'https://example.com/a\u001fb' }), { ok: false, error: INVALID_URL_TEXT }],
+      ['a url with U+007F', () => request({ url: 'https://example.com/a\u007fb' }), { ok: false, error: INVALID_URL_TEXT }],
+      ['a url that ends in a NUL', () => request({ url: 'https://example.com/a\u0000' }), { ok: false, error: INVALID_URL_TEXT }],
+      ['a file request with a NUL in its url', () => ({ ...fileRequest(), url: 'https://example.com/a\u0000b.pdf' }), { ok: false, error: INVALID_URL_TEXT }],
+      ['a playlist whose available entry has a NUL', () => listRequest([entryOf({ url: 'https://example.com/v/1\u0000' }), entryOf({ index: 2, url: 'https://example.com/v/2' })]), BAD],
+      ['a playlist whose last available entry has U+001F', () => listRequest([entryOf(), entryOf({ index: 2, url: 'https://example.com/v/2\u001f' })]), BAD],
+      ['a playlist whose available entry has U+007F', () => listRequest([entryOf({ url: 'https://example.com/\u007fv/1' }), entryOf({ index: 2, url: 'https://example.com/v/2' })]), BAD],
+      ['a playlist whose NUL entry is not selected', () => listRequest([entryOf({ url: 'https://example.com/v/1\u0000' }), entryOf({ index: 2, url: 'https://example.com/v/2' })], [2]), BAD],
+    ];
+
+    it.each(REFUSED_REAL)('%s is refused, and the snapshot, the saves and jobs.json stay unchanged', async (_name, make, answer) => {
+      const h = real();
+      expect(await h.handlers.add(request())).toEqual(ACCEPTED); // a job to protect
+      const before = h.queue.snapshot();
+      const savesBefore = h.saves.mock.calls.length;
+      const fileBefore = readFileSync(join(realData, 'jobs.json'), 'utf8');
+      const target = join(dir, 'new', 'deep');
+
+      expect(await h.handlers.add({ ...make(), dir: target })).toEqual(answer);
+
+      expect(h.queue.snapshot()).toEqual(before);
+      expect(h.saves.mock.calls.length).toBe(savesBefore);
+      expect(readFileSync(join(realData, 'jobs.json'), 'utf8')).toBe(fileBefore);
+      expect(existsSync(target)).toBe(false);
+      expect(h.saveErrors).toEqual([null]);
+
+      // The next good request works, and the list still loads.
+      expect(await h.handlers.add(request({ url: 'https://example.com/other' }))).toEqual(ACCEPTED);
+      const { snapshot: loaded, recoveredCorrupt } = reload();
+      expect(recoveredCorrupt).toBeNull();
+      expect(loaded.jobs).toHaveLength(before.jobs.length + 1);
+    });
+
+    it('accepts a placeholder whose url holds any control character, and round-trips it', async () => {
+      const h = real({ validateUrl: realValidateUrl });
+      const entries = [
+        entryOf({ index: 1 }),
+        ...CONTROL_CODES.map((code, i) => entryOf({ index: i + 2, url: `abc${String.fromCharCode(code)}def`, title: `Hidden ${i + 2}`, unavailable: true, reason: 'private' })),
+      ];
+      expect(await h.handlers.add(listRequest(entries))).toEqual(ACCEPTED);
+      const inQueue = h.queue.snapshot();
+      const { snapshot, recoveredCorrupt } = reload();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs).toEqual(inQueue.jobs.map(asLoaded));
+      const skipped = snapshot.jobs.filter((j) => j.state === 'skipped');
+      expect(skipped.map((j) => j.url)).toEqual(CONTROL_CODES.map((code) => `abc${String.fromCharCode(code)}def`));
+    });
+
+    it('accepts a link with a tab and a newline only at its edges, and round-trips it', async () => {
+      const h = real({ validateUrl: realValidateUrl });
+      expect(await h.handlers.add(request({ url: '\thttps://example.com/x\n' }))).toEqual(ACCEPTED);
+      const { snapshot, recoveredCorrupt } = reload();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs[0]?.url).toBe('https://example.com/x');
+    });
+  });
+});
+
+describe('C2: quality is rebuilt before it leaves IPC (handlers with fakes)', () => {
+  it.each(QUALITY_ROWS)('a %s quality with %s: queue.add receives the declared fields only', async (_kind, _extra, base, make, declared) => {
+    const bad = withExtra(base, make);
+    expect(await createHandlers(deps()).add(request({ quality: bad as unknown as Quality }))).toEqual(ACCEPTED);
+    expect(added).toHaveLength(1);
+    expect(added[0]?.quality).toStrictEqual(declared);
+    expect(added[0]?.quality).not.toBe(bad);
+    expect(added[0]).toStrictEqual({ url: 'https://example.com/v', probe: media, quality: declared, subtitleLangs: [], dir, selectedIndexes: null });
+  });
+
+  it.each(QUALITY_ROWS)('a %s quality with %s on a playlist request: queue.add receives the declared fields only', async (_kind, _extra, base, make, declared) => {
+    const bad = withExtra(base, make) as unknown as Quality;
+    expect(await createHandlers(deps()).add({ ...listRequest([entryOf()]), quality: bad })).toEqual(ACCEPTED);
+    expect(added[0]?.quality).toStrictEqual(declared);
+  });
+
+  it.each(QUALITY_ROWS)('a file probe never forwards a quality, even when the request carries a %s quality with %s', async (_kind, _extra, base, make) => {
+    const bad = withExtra(base, make) as unknown as Quality;
+    expect(await createHandlers(deps()).add({ ...fileRequest(), quality: bad })).toEqual(ACCEPTED);
+    expect(added[0]?.quality).toBeNull();
+  });
+
+  it('forwards a clean quality as an equal object, not the one it was given', async () => {
+    const quality: Quality = { kind: 'max', height: 1080 };
+    await createHandlers(deps()).add(request({ quality }));
+    expect(added[0]?.quality).toStrictEqual({ kind: 'max', height: 1080 });
+    expect(added[0]?.quality).not.toBe(quality);
+  });
+
+  it.each([
+    ['best with the fields of the other kinds', { kind: 'best', height: 720, format: 'mp3' }, { kind: 'best' }],
+    ['max with the format of audio', { kind: 'max', height: 1080, format: 'mp3' }, { kind: 'max', height: 1080 }],
+    ['audio with the height of max', { kind: 'audio', format: 'm4a', height: 1080 }, { kind: 'audio', format: 'm4a' }],
+  ])('drops the fields of other kinds: %s', async (_name, sent, declared) => {
+    expect(await createHandlers(deps()).add(request({ quality: sent as unknown as Quality }))).toEqual(ACCEPTED);
+    expect(added[0]?.quality).toStrictEqual(declared);
+    const res = await createHandlers(deps()).setSettings(makeSettings({ downloadDir: dir, defaultQuality: sent as unknown as Quality }));
+    expect(res.ok && res.value.defaultQuality).toStrictEqual(declared);
+    expect(savedSettings[0]?.defaultQuality).toStrictEqual(declared);
+    expect(queueSettings[0]?.defaultQuality).toStrictEqual(declared);
+  });
+
+  it('still refuses a quality that is not one', async () => {
+    expect(await createHandlers(deps()).add(request({ quality: { kind: 'max', height: 999, extra: 1n } as never }))).toEqual(BAD);
+    expect(added).toEqual([]);
+  });
+
+  it.each(QUALITY_ROWS)('setSettings with a %s default quality that carries %s: saveSettings, queue.setSettings and the answer carry the declared fields only', async (_kind, _extra, base, make, declared) => {
+    const bad = withExtra(base, make) as unknown as Quality;
+    const res = await createHandlers(deps()).setSettings(makeSettings({ downloadDir: dir, defaultQuality: bad }));
+    const expected = { ...makeSettings({ downloadDir: dir }), defaultQuality: declared };
+    expect(res).toEqual({ ok: true, value: expected });
+    expect(savedSettings).toHaveLength(1);
+    expect(queueSettings).toHaveLength(1);
+    expect(savedSettings[0]).toStrictEqual(expected);
+    expect(queueSettings[0]).toStrictEqual(expected);
+    expect(res.ok && res.value).toStrictEqual(expected);
+    expect(savedSettings[0]?.defaultQuality).not.toBe(bad);
+    expect(queueSettings[0]?.defaultQuality).not.toBe(bad);
+    expect(() => JSON.stringify(savedSettings[0])).not.toThrow();
+  });
+
+  it('setSettings with an extra key on the settings themselves carries the declared fields only', async () => {
+    const res = await createHandlers(deps()).setSettings({ ...makeSettings({ downloadDir: dir }), mystery: 1n } as Settings);
+    const expected = makeSettings({ downloadDir: dir });
+    expect(res).toEqual({ ok: true, value: expected });
+    expect(savedSettings[0]).toStrictEqual(expected);
+    expect(queueSettings[0]).toStrictEqual(expected);
+  });
+
+  it('setSettings still refuses a default quality that is not one', async () => {
+    const res = await createHandlers(deps()).setSettings(makeSettings({ downloadDir: dir, defaultQuality: { kind: 'max', height: 999, extra: 1n } as never }));
+    expect(res).toEqual(BAD);
+    expect(savedSettings).toEqual([]);
+    expect(queueSettings).toEqual([]);
+  });
+});
+
+describe('C3: a url with a control character never reaches the queue or a spawn (handlers with fakes)', () => {
+  const VALIDATORS: [string, Partial<HandlerDeps>][] = [
+    ['the validator of these specs', {}],
+    ['the real validateUrl', { validateUrl: realValidateUrl }],
+  ];
+  const target = () => join(dir, 'new', 'deep');
+
+  describe.each(VALIDATORS)('with %s', (_name, over) => {
+    const handlers = () => createHandlers({ ...deps(), ...over });
+
+    it('add refuses a control character inside the url, whichever it is: nothing is added and no folder is made', async () => {
+      const h = handlers();
+      for (const code of CONTROL_CODES) {
+        const res = await h.add(request({ url: `https://example.com/a${chr(code)}b`, dir: target() }));
+        expect(res, codeLabel(code)).toEqual({ ok: false, error: INVALID_URL_TEXT });
+      }
+      expect(added).toEqual([]);
+      expect(existsSync(target())).toBe(false);
+    });
+
+    it.each([0x00, 0x1f, 0x7f])('add refuses %i wherever it sits: after the scheme, in the path, the query, the fragment and at the end', async (code) => {
+      const h = handlers();
+      const c = chr(code);
+      const urls = [`https://${c}example.com/x`, `https://example.com/${c}x`, `https://example.com/x?q=${c}`, `https://example.com/x#${c}f`, `https://example.com/x${c}`, `${c}https://example.com/x`];
+      for (const url of urls) {
+        expect(await h.add(request({ url, dir: target() })), `${codeLabel(code)} in ${JSON.stringify(url)}`).toEqual({ ok: false, error: INVALID_URL_TEXT });
+      }
+      expect(added).toEqual([]);
+      expect(existsSync(target())).toBe(false);
+    });
+
+    it('add refuses a control character that trimming does not remove, even at the edges', async () => {
+      const h = handlers();
+      // tab, line feed, vertical tab, form feed and carriage return are whitespace: trim takes them. These are not.
+      for (const code of [0x00, 0x01, 0x08, 0x0e, 0x1c, 0x1f, 0x7f]) {
+        expect(await h.add(request({ url: `https://example.com/x${chr(code)}`, dir: target() })), `${codeLabel(code)} at the end`).toEqual({ ok: false, error: INVALID_URL_TEXT });
+      }
+      expect(added).toEqual([]);
+      expect(existsSync(target())).toBe(false);
+    });
+
+    it('add refuses with the same text for the two forms of a bad link', async () => {
+      const h = handlers();
+      const control = await h.add(request({ url: 'https://example.com/a\u0000b' }));
+      const scheme = await h.add(request({ url: 'ftp://example.com/a' }));
+      expect(control).toEqual(scheme);
+      expect(control).toEqual({ ok: false, error: INVALID_URL_TEXT });
+    });
+
+    it.each([
+      ['a tab and a newline at the edges', '\thttps://example.com/x\n'],
+      ['a carriage return and a line feed at both edges', '\r\nhttps://example.com/x\r\n'],
+      ['a vertical tab and a form feed', '\vhttps://example.com/x\f'],
+      ['spaces, tabs and controls together at the edges', ' \t https://example.com/x \v\f'],
+      ['only a leading tab', '\thttps://example.com/x'],
+      ['only a trailing newline', 'https://example.com/x\n'],
+    ])('add still accepts a link with %s, trimmed', async (_label, url) => {
+      expect(await handlers().add(request({ url, dir: target() }))).toEqual(ACCEPTED);
+      expect(added).toHaveLength(1);
+      expect(added[0]?.url).toBe('https://example.com/x');
+      expect(existsSync(target())).toBe(true);
+    });
+
+    it.each([
+      ['U+0020, the first character above the controls', 0x20],
+      ['U+007E, the last one below U+007F', 0x7e],
+      ['U+0080, the first one above U+007F', 0x80],
+      ['U+009F, the end of the other control block', 0x9f],
+      ['U+00A0, a non-breaking space', 0xa0],
+    ])('add accepts %s inside the url', async (_label, code) => {
+      const url = `https://example.com/a${chr(code)}b`;
+      expect(await handlers().add(request({ url, dir: target() }))).toEqual(ACCEPTED);
+      expect(added).toHaveLength(1);
+      expect(added[0]?.url).toBe(url);
+      expect(existsSync(target())).toBe(true);
+    });
+
+    it('probe refuses a control character inside the url, whichever it is: nothing is probed', async () => {
+      const h = handlers();
+      for (const code of CONTROL_CODES) {
+        const res = await h.probe(`https://example.com/a${chr(code)}b`);
+        expect(res, codeLabel(code)).toEqual({ ok: false, error: INVALID_URL_TEXT });
+      }
+      expect(probed).toEqual([]);
+    });
+
+    it('probe with a NUL answers the InvalidUrl text, and deps.probe is not called', async () => {
+      expect(await handlers().probe('https://example.com/a\u0000b')).toEqual({ ok: false, error: INVALID_URL_TEXT });
+      expect(await handlers().probe('https://example.com/a\u0000')).toEqual({ ok: false, error: INVALID_URL_TEXT });
+      expect(probed).toEqual([]);
+    });
+
+    it.each([0x1c, 0x1f, 0x7f])('probe refuses %i at the end of the url, where trimming does not remove it', async (code) => {
+      expect(await handlers().probe(`https://example.com/x${chr(code)}`)).toEqual({ ok: false, error: INVALID_URL_TEXT });
+      expect(probed).toEqual([]);
+    });
+
+    it.each([
+      ['a tab and a newline at the edges', '\thttps://example.com/x\n'],
+      ['spaces and controls that trim removes', ' \r\n https://example.com/x \v\f'],
+    ])('probe still accepts a link with %s, and probes it trimmed', async (_label, url) => {
+      expect(await handlers().probe(url)).toEqual({ ok: true, value: media });
+      expect(probed).toEqual(['https://example.com/x']);
+    });
+
+    it.each([0x20, 0x7e, 0x80, 0xa0])('probe accepts %i inside the url', async (code) => {
+      const url = `https://example.com/a${chr(code)}b`;
+      expect(await handlers().probe(url)).toEqual({ ok: true, value: media });
+      expect(probed).toEqual([url]);
+    });
+
+    it('an available playlist entry with a control character answers BAD_REQUEST, whichever it is', async () => {
+      const h = handlers();
+      for (const code of CONTROL_CODES) {
+        const entries = [entryOf({ url: `https://example.com/v/1${chr(code)}x` }), entryOf({ index: 2, url: 'https://example.com/v/2' })];
+        expect(await h.add({ ...listRequest(entries), dir: target() }), codeLabel(code)).toEqual(BAD);
+      }
+      expect(added).toEqual([]);
+      expect(existsSync(target())).toBe(false);
+    });
+
+    it.each([0x00, 0x1f, 0x7f])('an available entry with %i answers BAD_REQUEST wherever it is in the playlist and whether or not it is selected', async (code) => {
+      const h = handlers();
+      const bad = entryOf({ index: 2, url: `https://example.com/v/2${chr(code)}` });
+      const good = (i: number) => entryOf({ index: i, url: `https://example.com/v/${i}` });
+      const lists: [string, AddRequest][] = [
+        ['first', listRequest([entryOf({ url: `https://example.com/v/1${chr(code)}` }), good(2), good(3)])],
+        ['middle', listRequest([good(1), bad, good(3)])],
+        ['last', listRequest([good(1), good(3), entryOf({ index: 4, url: `https://example.com/v/4${chr(code)}` })])],
+        ['not selected', listRequest([good(1), bad, good(3)], [1, 3])],
+        ['alone', listRequest([bad])],
+      ];
+      for (const [where, req] of lists) {
+        expect(await h.add({ ...req, dir: target() }), where).toEqual(BAD);
+      }
+      expect(added).toEqual([]);
+      expect(existsSync(target())).toBe(false);
+    });
+
+    it('an available entry with a control character only at its edges is accepted', async () => {
+      const entries = [entryOf({ url: '\thttps://example.com/v/1\n' }), entryOf({ index: 2, url: 'https://example.com/v/2' })];
+      expect(await handlers().add(listRequest(entries))).toEqual(ACCEPTED);
+      expect(added).toHaveLength(1);
+    });
+
+    it('an unavailable entry still accepts any string url, whatever control characters it holds', async () => {
+      const h = handlers();
+      for (const code of CONTROL_CODES) {
+        const url = `abc${chr(code)}def`;
+        const entries = [entryOf(), entryOf({ index: 2, url, unavailable: true, reason: 'private' })];
+        expect(await h.add(listRequest(entries)), codeLabel(code)).toEqual(ACCEPTED);
+        const sent = added.at(-1)?.probe;
+        expect(sent?.kind === 'playlist' && sent.entries[1]?.url, codeLabel(code)).toBe(url);
+      }
+      expect(added).toHaveLength(CONTROL_CODES.length);
+    });
+
+    it('an unavailable entry with a NUL url next to an available entry with a NUL url is still refused for the available one', async () => {
+      const entries = [entryOf({ url: 'https://example.com/v/1\u0000' }), entryOf({ index: 2, url: 'a\u0000b', unavailable: true, reason: 'removed' })];
+      expect(await handlers().add(listRequest(entries))).toEqual(BAD);
+      expect(added).toEqual([]);
+    });
   });
 });
 

@@ -30,8 +30,11 @@ export function isQuality(v: unknown): v is Quality {
   return false;
 }
 
-/** A new Quality with its declared fields only, so no extra key is carried into the next save. */
-function copyQuality(q: Quality): Quality {
+/**
+ * A new Quality with its declared fields only, so no extra key is carried into the
+ * next save. Expects a value isQuality accepted.
+ */
+export function copyQuality(q: Quality): Quality {
   if (q.kind === 'max') return { kind: 'max', height: q.height };
   if (q.kind === 'audio') return { kind: 'audio', format: q.format };
   return { kind: 'best' };
@@ -60,9 +63,14 @@ export function isAbsoluteDir(v: unknown): v is string {
   return typeof v === 'string' && win32.isAbsolute(v);
 }
 
+/**
+ * An http(s) link by the rule the window's links are checked with (validateUrl):
+ * trimmed first, so a link with spaces around it that IPC accepted loads again.
+ * The caller keeps the stored url as it was.
+ */
 function isHttpUrl(v: string): boolean {
   try {
-    const { protocol } = new URL(v);
+    const { protocol } = new URL(v.trim());
     return protocol === 'http:' || protocol === 'https:';
   } catch {
     return false;

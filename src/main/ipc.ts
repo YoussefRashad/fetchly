@@ -2,19 +2,22 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   type AddRequest,
+  type AppStatus,
   type BinName,
   type BinStatus,
+  type EngineStatus,
   type EntryReason,
   type GroupVerb,
   type JobVerb,
   type PlaylistEntry,
   type ProbeResult,
+  type Quality,
   type Result,
   type Settings,
   type Snapshot,
 } from '../shared/types';
 import { normalizeSettings } from './jobs/store';
-import { everyPosition, isAbsoluteDir, isLangList, isQuality } from './jobs/validate';
+import { copyQuality, everyPosition, isAbsoluteDir, isLangList, isQuality } from './jobs/validate';
 import { sanitizeFileName } from './naming';
 import { InvalidUrl, ProbeError } from './probe';
 import { MAX_HEIGHTS } from './ytdlp/parse';
@@ -22,15 +25,21 @@ import { MAX_HEIGHTS } from './ytdlp/parse';
 /** The part of the queue the window can reach. */
 export interface QueueLike {
   add(req: AddRequest): void;
-  job(id: string, verb: JobVerb): Promise<unknown>;
-  group(id: string, verb: GroupVerb): Promise<unknown>;
+  job(id: string, verb: JobVerb): Promise<Result<null>>;
+  group(id: string, verb: GroupVerb): Promise<Result<null>>;
+  /** The user ended the leftover tool processes by hand. */
+  confirmStraysGone(): void;
   snapshot(): Snapshot;
   setSettings(s: Settings): void;
 }
 
 export interface HandlerDeps {
-  /** null until the download tools are installed and the engines are running */
+  /** null until the engines started once; kept after an aria2 exit */
   queue(): QueueLike | null;
+  /** The engine status from the host and the last save error. */
+  status(): AppStatus;
+  /** Starts the engines again after an error (the host's retry); never rejects. */
+  retryEngines(): Promise<void>;
   getSettings(): Settings;
   saveSettings(s: Settings): void;
   validateUrl(raw: string): string;
@@ -41,7 +50,7 @@ export interface HandlerDeps {
     updateYtDlp(): Promise<string>;
   };
   onInstallProgress(name: BinName, pct: number): void;
-  /** starts the engines once the tools are in place */
+  /** starts the engines once the tools are in place (the host's start); never rejects, the outcome is status() */
   afterInstall(): Promise<void>;
   pickFolder(): Promise<string | null>;
   openPath(path: string): Promise<void>;
@@ -51,8 +60,21 @@ export interface HandlerDeps {
 
 const JOB_VERBS: readonly string[] = ['pause', 'resume', 'cancel', 'retry', 'remove', 'removeWithFile'];
 const GROUP_VERBS: readonly string[] = ['pause', 'resume', 'cancel'];
-const NOT_READY = 'Install the download tools first';
 const BAD_REQUEST = 'That request is not valid';
+
+/** The engine status in words: why a handler that needs the queue cannot run, or why a start did not work. */
+function statusText(engine: EngineStatus): string {
+  if (engine.state === 'notInstalled') return 'Install the download tools first';
+  if (engine.state === 'error') return engine.message;
+  // 'ready' always comes with a queue, so only 'starting' really reaches this line.
+  return 'The download tools are still starting';
+}
+
+// eslint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001f\u007f]/u;
+
+/** C3: a link that, trimmed, still holds a control character never reaches the queue or a spawn. */
+const hasControl = (url: string): boolean => CONTROL.test(url.trim());
 
 const ok = <T>(value: T): Result<T> => ({ ok: true, value });
 const fail = (error: string): Result<never> => ({ ok: false, error });
@@ -89,14 +111,17 @@ function acceptsUrl(url: string, validateUrl: (raw: string) => string): boolean 
   }
 }
 
-/** One playlist entry as the probe gives it; a placeholder (unavailable) may carry any string url. */
+/**
+ * One playlist entry as the probe gives it; a placeholder (unavailable) may carry any
+ * string url. An available entry's url must be a link without a control character (C3).
+ */
 function validEntry(e: unknown, validateUrl: (raw: string) => string): e is PlaylistEntry {
   if (!isObject(e)) return false;
   const { index, title, url, unavailable, reason } = e;
   if (!Number.isInteger(index) || (index as number) < 1) return false;
   if (typeof title !== 'string' || typeof url !== 'string' || typeof unavailable !== 'boolean') return false;
   if (unavailable) return ENTRY_REASONS.includes(reason);
-  return reason === null && acceptsUrl(url, validateUrl);
+  return reason === null && !hasControl(url) && acceptsUrl(url, validateUrl);
 }
 
 /**
@@ -137,24 +162,38 @@ function validProbe(probe: unknown, validateUrl: (raw: string) => string): probe
 }
 
 export function createHandlers(deps: HandlerDeps) {
+  /** The answer of a handler that needs the queue while there is none. */
+  const noQueue = (): Result<never> => fail(statusText(deps.status().engine));
+
+  /** The window's link checked and trimmed; a control character inside it is refused like any bad link (C3). */
+  const linkOf = (raw: string): string => {
+    if (hasControl(raw)) throw new InvalidUrl();
+    return deps.validateUrl(raw);
+  };
+
   return {
     probe: (raw: string): Promise<Result<ProbeResult>> =>
       guarded(async () => {
         if (typeof raw !== 'string') return fail(describe(new InvalidUrl()));
-        return ok(await deps.probe(deps.validateUrl(raw)));
+        return ok(await deps.probe(linkOf(raw)));
       }),
 
     add: (req: AddRequest): Promise<Result<null>> =>
       guarded(async () => {
         if (!isObject(req) || typeof req.url !== 'string') return fail(BAD_REQUEST);
         const queue = deps.queue();
-        if (!queue) return fail(NOT_READY);
+        if (!queue) return noQueue();
 
-        const url = deps.validateUrl(req.url);
+        const url = linkOf(req.url);
         if (!validProbe(req.probe, deps.validateUrl)) return fail(BAD_REQUEST);
         if (!isAbsoluteDir(req.dir)) return fail('Choose a download folder');
         if (!isLangList(req.subtitleLangs)) return fail('Subtitle languages must be codes like en or ar');
-        if (req.probe.kind !== 'file' && !isQuality(req.quality)) return fail(BAD_REQUEST);
+        let quality: Quality | null = null;
+        if (req.probe.kind !== 'file') {
+          if (!isQuality(req.quality)) return fail(BAD_REQUEST);
+          // Rebuilt from its declared fields, so nothing else reaches the next save (C2).
+          quality = copyQuality(req.quality);
+        }
 
         let selected: number[] | null = null;
         if (req.probe.kind === 'playlist') {
@@ -174,7 +213,7 @@ export function createHandlers(deps: HandlerDeps) {
         queue.add({
           url,
           probe: req.probe,
-          quality: req.probe.kind === 'file' ? null : req.quality,
+          quality,
           subtitleLangs: req.subtitleLangs,
           dir: req.dir,
           selectedIndexes: selected,
@@ -186,18 +225,34 @@ export function createHandlers(deps: HandlerDeps) {
       guarded(async () => {
         if (typeof id !== 'string' || !JOB_VERBS.includes(verb)) return fail(BAD_REQUEST);
         const queue = deps.queue();
-        if (!queue) return fail(NOT_READY);
-        await queue.job(id, verb);
-        return ok(null);
+        if (!queue) return noQueue();
+        return queue.job(id, verb);
       }),
 
     group: (id: string, verb: GroupVerb): Promise<Result<null>> =>
       guarded(async () => {
         if (typeof id !== 'string' || !GROUP_VERBS.includes(verb)) return fail(BAD_REQUEST);
         const queue = deps.queue();
-        if (!queue) return fail(NOT_READY);
-        await queue.group(id, verb);
+        if (!queue) return noQueue();
+        return queue.group(id, verb);
+      }),
+
+    confirmStraysGone: (): Promise<Result<null>> =>
+      guarded(async () => {
+        const queue = deps.queue();
+        if (!queue) return noQueue();
+        queue.confirmStraysGone();
         return ok(null);
+      }),
+
+    status: async (): Promise<AppStatus> => deps.status(),
+
+    /** Answers by the status after the host's retry: ok only when the engines are ready. */
+    retryEngines: (): Promise<Result<null>> =>
+      guarded(async () => {
+        await deps.retryEngines();
+        const { engine } = deps.status();
+        return engine.state === 'ready' ? ok(null) : fail(statusText(engine));
       }),
 
     snapshot: async (): Promise<Snapshot> => deps.queue()?.snapshot() ?? { jobs: [], groups: [] },
@@ -217,7 +272,8 @@ export function createHandlers(deps: HandlerDeps) {
           speedLimitKbps: Number(s.speedLimitKbps),
           autoResumeOnStart: s.autoResumeOnStart === true,
           preferMp4Max1080: s.preferMp4Max1080 === true,
-          defaultQuality: s.defaultQuality,
+          // Rebuilt from its declared fields, so nothing else reaches settings.json or the queue (C2).
+          defaultQuality: copyQuality(s.defaultQuality),
           subtitleLangs: s.subtitleLangs,
         });
         deps.saveSettings(next);
@@ -259,7 +315,9 @@ export function createHandlers(deps: HandlerDeps) {
         try {
           await deps.binaries.ensureAll(deps.onInstallProgress);
           await deps.afterInstall();
-          return ok(null);
+          // The tools are in place; a start that did not work is told, not hidden.
+          const { engine } = deps.status();
+          return engine.state === 'error' ? fail(engine.message) : ok(null);
         } catch (e) {
           // Install errors are already written for people ("could not download ffmpeg: …").
           return fail(e instanceof Error ? e.message : String(e));

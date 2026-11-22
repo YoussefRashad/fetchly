@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
-import type { BinName, HammelApi, Snapshot } from '../shared/types';
+import type { AppStatus, BinName, HammelApi, Snapshot } from '../shared/types';
 
 function subscribe<A extends unknown[]>(channel: string, cb: (...args: A) => void): () => void {
   const listener = (_event: IpcRendererEvent, ...args: unknown[]): void => cb(...(args as A));
@@ -32,6 +32,10 @@ const api: HammelApi = {
   onInstallProgress: (cb) => subscribe<[BinName, number]>('hammel:installProgress', cb),
   updateYtDlp: call('updateYtDlp'),
   startupNotice: call('startupNotice'),
+  status: call('status'),
+  onStatus: (cb) => subscribe<[AppStatus]>('hammel:status', cb),
+  retryEngines: call('retryEngines'),
+  confirmStraysGone: call('confirmStraysGone'),
 };
 
 contextBridge.exposeInMainWorld('hammel', api);
