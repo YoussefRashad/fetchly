@@ -17,7 +17,7 @@ const dir = valueOf('-P') ?? '.';
 const base = (valueOf('-o') ?? 'out.%(ext)s').replace('.%(ext)s', '').replaceAll('%%', '%');
 const out = (line) => process.stdout.write(`${line}\n`);
 const err = (line) => process.stderr.write(`${line}\n`);
-const progress = (done, total) => out(`HAMMEL_PROGRESS ${done} ${total} NA 1000 5`);
+const progress = (done, total) => out(`FETCHLY_PROGRESS ${done} ${total} NA 1000 5`);
 const part = () => writeFileSync(join(dir, `${base}.mp4.part`), 'partial');
 
 function heightProbe(mode) {
@@ -49,7 +49,7 @@ function download(name) {
       progress(1000, 1000);
       out(`[Merger] Merging formats into "${join(dir, `${base}.mp4`)}"`);
       writeFileSync(join(dir, `${base}.mp4`), 'video');
-      out(`HAMMEL_FILE 1080 ${join(dir, `${base}.mp4`)}`);
+      out(`FETCHLY_FILE 1080 ${join(dir, `${base}.mp4`)}`);
       break;
     case 'drop':
       progress(100, 1000);

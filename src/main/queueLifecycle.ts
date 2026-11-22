@@ -52,12 +52,12 @@ export function createQueueLifecycle(deps: QueueLifecycleDeps): QueueLifecycle {
     },
 
     wireQueue: (queue) => {
-      queue.onChanged((s) => deps.send('hammel:changed', s));
+      queue.onChanged((s) => deps.send('fetchly:changed', s));
       queue.onSaveState(deps.onSaveState);
       deps.attachTray(queue);
       // resumeAllPaused passes over cut-off jobs.
       if (deps.settings().autoResumeOnStart) queue.resumeAllPaused();
-      deps.send('hammel:changed', queue.snapshot());
+      deps.send('fetchly:changed', queue.snapshot());
       // Only a queue whose wiring completed gets a restarted aria2.
       wiredFile = fileOf.get(queue) ?? null;
     },

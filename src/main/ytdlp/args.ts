@@ -1,7 +1,7 @@
 import type { Quality } from '../../shared/types';
 
-export const PROGRESS_PREFIX = 'HAMMEL_PROGRESS';
-export const FILE_PREFIX = 'HAMMEL_FILE';
+export const PROGRESS_PREFIX = 'FETCHLY_PROGRESS';
+export const FILE_PREFIX = 'FETCHLY_FILE';
 
 export function probeArgs(url: string): string[] {
   return ['-J', '--flat-playlist', '--no-warnings', url];

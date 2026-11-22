@@ -17,9 +17,9 @@ const SAVE_PROGRESS_EVERY_MS = 5000;
 
 const PAUSE_NOT_CONFIRMED = 'Could not confirm that the download stopped. It is still listed as running; try again.';
 const CANCEL_NOT_CONFIRMED = 'Could not confirm that the download stopped, so nothing was deleted. It is still in the list; try again.';
-const CLOSING = 'Hammel is closing';
+const CLOSING = 'Fetchly is closing';
 const CUT_OFF =
-  'This download was cut off and Hammel could not check that its old process is gone. End yt-dlp, ffmpeg and aria2c in Task Manager, then choose "They are gone" in the banner, or restart Hammel.';
+  'This download was cut off and Fetchly could not check that its old process is gone. End yt-dlp, ffmpeg and aria2c in Task Manager, then choose "They are gone" in the banner, or restart Fetchly.';
 
 const ok = (): Result<null> => ({ ok: true, value: null });
 const fail = (error: string): Result<null> => ({ ok: false, error });

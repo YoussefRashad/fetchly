@@ -5,14 +5,14 @@ import { killStrays, strayKillScript } from '../src/main/strays';
 const count = (text: string, pattern: RegExp): number => (text.match(pattern) ?? []).length;
 
 describe('strayKillScript', () => {
-  const script = strayKillScript('C:\\Users\\me\\AppData\\Roaming\\hammel\\bin');
+  const script = strayKillScript('C:\\Users\\me\\AppData\\Roaming\\fetchly\\bin');
 
   it('looks only at the three tools', () => {
     expect(script).toContain("Name='yt-dlp.exe' OR Name='ffmpeg.exe' OR Name='aria2c.exe'");
   });
 
   it('kills only processes started from the app’s own tool folder', () => {
-    expect(script).toContain("$_.ExecutablePath -and $_.ExecutablePath.StartsWith('C:\\Users\\me\\AppData\\Roaming\\hammel\\bin\\', [System.StringComparison]::OrdinalIgnoreCase)");
+    expect(script).toContain("$_.ExecutablePath -and $_.ExecutablePath.StartsWith('C:\\Users\\me\\AppData\\Roaming\\fetchly\\bin\\', [System.StringComparison]::OrdinalIgnoreCase)");
     expect(script).toContain('Stop-Process -Id $_.ProcessId -Force');
   });
 
@@ -25,7 +25,7 @@ describe('strayKillScript', () => {
   });
 
   describe('result of the check (B13, C6)', () => {
-    const FOLDER = 'C:\\Users\\me\\AppData\\Roaming\\hammel\\bin';
+    const FOLDER = 'C:\\Users\\me\\AppData\\Roaming\\fetchly\\bin';
     const filter = (prefix: string) =>
       `Get-CimInstance Win32_Process -Filter "Name='yt-dlp.exe' OR Name='ffmpeg.exe' OR Name='aria2c.exe'" | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith('${prefix}', [System.StringComparison]::OrdinalIgnoreCase) }`;
     /** The exact text of Task 9.1, with the folder (and its trailing backslash) put in. */

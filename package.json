@@ -1,8 +1,12 @@
 {
-  "name": "hammel",
+  "name": "fetchly",
   "version": "0.1.0",
   "private": true,
-  "description": "Personal download manager",
+  "description": "Download manager for Windows: videos, playlists and direct files, with pause/resume that survives restarts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YoussefRashad/fetchly.git"
+  },
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

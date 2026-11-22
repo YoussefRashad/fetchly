@@ -16,7 +16,7 @@ export function finishedMessage(e: Finished): { title: string; body: string } {
 
 export function trayTooltip(s: Snapshot): string {
   const active = s.jobs.filter((j) => ACTIVE.has(j.state)).length;
-  return active === 0 ? 'Hammel' : `Hammel · ${active} downloading`;
+  return active === 0 ? 'Fetchly' : `Fetchly · ${active} downloading`;
 }
 
 /** The tray icon, drawn here so the project carries no binary asset: a down arrow over a tray line. */

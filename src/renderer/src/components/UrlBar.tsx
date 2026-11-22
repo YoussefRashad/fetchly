@@ -18,7 +18,7 @@ export function UrlBar({ onProbed, onOpenSettings }: Props) {
     if (busy || value === '') return;
     setBusy(true);
     setError(null);
-    const res = await window.hammel.probe(value);
+    const res = await window.fetchly.probe(value);
     setBusy(false);
     if (!res.ok) return setError(res.error);
     setUrl('');

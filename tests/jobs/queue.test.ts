@@ -159,9 +159,9 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 const OK = { ok: true, value: null } as const;
 const PAUSE_NOT_CONFIRMED = 'Could not confirm that the download stopped. It is still listed as running; try again.';
 const CANCEL_NOT_CONFIRMED = 'Could not confirm that the download stopped, so nothing was deleted. It is still in the list; try again.';
-const CLOSING = 'Hammel is closing';
+const CLOSING = 'Fetchly is closing';
 const CUT_OFF =
-  'This download was cut off and Hammel could not check that its old process is gone. End yt-dlp, ffmpeg and aria2c in Task Manager, then choose "They are gone" in the banner, or restart Hammel.';
+  'This download was cut off and Fetchly could not check that its old process is gone. End yt-dlp, ffmpeg and aria2c in Task Manager, then choose "They are gone" in the banner, or restart Fetchly.';
 /** The save error a listener is told about when the store throws `reason`. */
 const saveMessage = (reason: string): string => `could not save the download list: ${reason}`;
 /** SAVE_RETRY_MS as the plan states it (OQ2); one spec checks the exported constant against it. */
@@ -195,7 +195,7 @@ function saveStates(q: Queue): (string | null)[] {
 }
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'hammel-queue-'));
+  dir = mkdtempSync(join(tmpdir(), 'fetchly-queue-'));
   log = [];
   saveFails = { on: false, message: 'disk full' };
   media = new FakeEngine();
@@ -2532,7 +2532,7 @@ describe('shutdown (7.6)', () => {
       expect(saveAttempts()).toBe(attempts);
     });
 
-    it.each(VERBS)('job() answers that Hammel is closing for %s and changes nothing', async (verb) => {
+    it.each(VERBS)('job() answers that Fetchly is closing for %s and changes nothing', async (verb) => {
       const q = build();
       q.add(video());
       media.emit(done(jobAt(q, 0).id));
@@ -2545,7 +2545,7 @@ describe('shutdown (7.6)', () => {
       expect(media.discarded).toEqual([]);
     });
 
-    it.each(GROUP_VERBS)('group() answers that Hammel is closing for %s and changes nothing', async (verb) => {
+    it.each(GROUP_VERBS)('group() answers that Fetchly is closing for %s and changes nothing', async (verb) => {
       const q = build();
       q.add(playlist(2));
       const gid = groupAt(q).id;
@@ -2597,7 +2597,7 @@ describe('shutdown (7.6)', () => {
   });
 
   it.each(['resume', 'cancel', 'retry', 'remove', 'removeWithFile'] as const)(
-    'a %s waiting in the chain when shutdown starts does nothing and answers that Hammel is closing',
+    'a %s waiting in the chain when shutdown starts does nothing and answers that Fetchly is closing',
     async (verb) => {
       const q = build();
       q.add(video());
@@ -2618,7 +2618,7 @@ describe('shutdown (7.6)', () => {
     },
   );
 
-  it.each(GROUP_VERBS)('a group %s waiting in the chain when shutdown starts does nothing and answers that Hammel is closing', async (verb) => {
+  it.each(GROUP_VERBS)('a group %s waiting in the chain when shutdown starts does nothing and answers that Fetchly is closing', async (verb) => {
     const q = build();
     q.add(playlist(2));
     const [a, b] = ids(q) as [string, string];

@@ -13,7 +13,7 @@ export interface ShellActions {
 export function createTray(actions: ShellActions): Tray {
   const { size, data } = trayIconBitmap();
   const tray = new Tray(nativeImage.createFromBitmap(data, { width: size, height: size }));
-  tray.setToolTip('Hammel');
+  tray.setToolTip('Fetchly');
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: 'Open', click: () => actions.showWindow() },

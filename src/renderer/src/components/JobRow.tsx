@@ -23,12 +23,12 @@ export function JobRow({ job, onError }: Props) {
   async function act(verb: JobVerb) {
     if (verb === 'cancel' && !window.confirm(S.confirmCancel(job.title))) return;
     if (verb === 'removeWithFile' && !window.confirm(S.confirmDeleteFile(job.title))) return;
-    const res = await window.hammel.job(job.id, verb);
+    const res = await window.fetchly.job(job.id, verb);
     if (!res.ok) onError(res.error);
   }
 
   async function open(kind: 'file' | 'folder') {
-    const res = kind === 'file' ? await window.hammel.openFile(job.id) : await window.hammel.openFolder(job.id);
+    const res = kind === 'file' ? await window.fetchly.openFile(job.id) : await window.fetchly.openFolder(job.id);
     if (!res.ok) onError(res.error);
   }
 

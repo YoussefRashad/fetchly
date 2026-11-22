@@ -11,7 +11,7 @@ let dir: string;
 const DOWNLOADS = 'C:\\Users\\me\\Downloads';
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'hammel-store-'));
+  dir = mkdtempSync(join(tmpdir(), 'fetchly-store-'));
 });
 
 const group: Group = { id: 'g1', title: 'Course', url: 'https://example.com/list', dir: 'D:\\Dl\\Course', createdAt: 1 };
@@ -29,7 +29,7 @@ describe('Store', () => {
     const loaded = new Store(dir, DOWNLOADS).load();
     expect(loaded.snapshot).toEqual({ jobs: [], groups: [] });
     expect(loaded.settings).toEqual(DEFAULT_SETTINGS(DOWNLOADS));
-    expect(loaded.settings.downloadDir).toBe(join(DOWNLOADS, 'Hammel'));
+    expect(loaded.settings.downloadDir).toBe(join(DOWNLOADS, 'Fetchly'));
     expect(loaded.settings.maxConcurrent).toBe(3);
   });
 

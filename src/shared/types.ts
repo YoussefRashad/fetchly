@@ -144,8 +144,8 @@ export interface AppStatus {
   saveError: string | null;
 }
 
-/** What the window may ask the main process to do. Exposed as `window.hammel`. */
-export interface HammelApi {
+/** What the window may ask the main process to do. Exposed as `window.fetchly`. */
+export interface FetchlyApi {
   probe(url: string): Promise<Result<ProbeResult>>;
   add(req: AddRequest): Promise<Result<null>>;
   job(id: string, verb: JobVerb): Promise<Result<null>>;

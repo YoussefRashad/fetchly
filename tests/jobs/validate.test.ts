@@ -615,7 +615,7 @@ describe('parseSnapshotFile', () => {
 });
 
 describe('parseSettings', () => {
-  const defaults: Settings = makeSettings({ downloadDir: 'C:\\Users\\me\\Downloads\\Hammel' });
+  const defaults: Settings = makeSettings({ downloadDir: 'C:\\Users\\me\\Downloads\\Fetchly' });
 
   it('returns a valid old settings file unchanged', () => {
     const saved = makeSettings({ maxConcurrent: 5, subtitleLangs: ['ar', 'en'], defaultQuality: { kind: 'max', height: 720 } });
@@ -626,7 +626,7 @@ describe('parseSettings', () => {
     ['subtitle languages that are an object', { subtitleLangs: {} }, { subtitleLangs: [] }],
     ['a subtitle language that is an option', { subtitleLangs: ['en', '--exec'] }, { subtitleLangs: [] }],
     ['an impossible quality', { defaultQuality: { kind: 'max', height: 7 } }, { defaultQuality: { kind: 'best' } }],
-    ['a relative download folder', { downloadDir: 'x' }, { downloadDir: 'C:\\Users\\me\\Downloads\\Hammel' }],
+    ['a relative download folder', { downloadDir: 'x' }, { downloadDir: 'C:\\Users\\me\\Downloads\\Fetchly' }],
     ['slots as text', { maxConcurrent: '4' }, { maxConcurrent: 3 }],
     ['an infinite limit', { speedLimitKbps: null }, { speedLimitKbps: 0 }],
     ['a flag as text', { askEveryTime: 'true' }, { askEveryTime: false }],
@@ -893,7 +893,7 @@ describe('isQuality, isLangList and isAbsoluteDir', () => {
     expect(isLangList(value)).toBe(false);
   });
 
-  it.each(['D:\\Dl', 'C:\\', 'C:\\Users\\me\\Downloads\\Hammel', '\\\\server\\share\\x'])('accepts %j as an absolute folder', (value) => {
+  it.each(['D:\\Dl', 'C:\\', 'C:\\Users\\me\\Downloads\\Fetchly', '\\\\server\\share\\x'])('accepts %j as an absolute folder', (value) => {
     expect(isAbsoluteDir(value)).toBe(true);
   });
 

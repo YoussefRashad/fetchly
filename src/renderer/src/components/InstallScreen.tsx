@@ -11,12 +11,12 @@ export function InstallScreen({ onInstalled }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<Partial<Record<BinName, number>>>({});
 
-  useEffect(() => window.hammel.onInstallProgress((name, pct) => setProgress((p) => ({ ...p, [name]: pct }))), []);
+  useEffect(() => window.fetchly.onInstallProgress((name, pct) => setProgress((p) => ({ ...p, [name]: pct }))), []);
 
   async function install() {
     setBusy(true);
     setError(null);
-    const res = await window.hammel.installBinaries();
+    const res = await window.fetchly.installBinaries();
     setBusy(false);
     if (res.ok) onInstalled();
     else setError(res.error);

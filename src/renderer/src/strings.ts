@@ -3,7 +3,7 @@ import type { Filter } from './format';
 
 /** Text of the window's own controls and dialogs. Status words, reasons from the main process, tray text and notifications are not collected here yet. */
 export const S = {
-  appName: 'Hammel',
+  appName: 'Fetchly',
   urlPlaceholder: 'Paste a video, playlist or file link',
   add: 'Add',
   checking: 'Checking…',
@@ -65,7 +65,7 @@ export const S = {
 
   installTitle: 'One-time setup',
   installBody:
-    'Hammel needs three free tools to download. They are fetched from their official GitHub release pages into the app’s own data folder, and yt-dlp and ffmpeg are checked against their published checksums; aria2 is checked against a checksum built into Hammel.',
+    'Fetchly needs three free tools to download. They are fetched from their official GitHub release pages into the app’s own data folder, and yt-dlp and ffmpeg are checked against their published checksums; aria2 is checked against a checksum built into Fetchly.',
   installTools: [
     ['yt-dlp', 'reads video sites and downloads the streams'],
     ['ffmpeg', 'joins the video and audio into one file'],
@@ -76,7 +76,7 @@ export const S = {
   retryInstall: 'Try again',
 
   cutOffBanner:
-    'Some downloads were cut off and Hammel could not check that their old processes are gone. End yt-dlp, ffmpeg and aria2c in Task Manager, then confirm.',
+    'Some downloads were cut off and Fetchly could not check that their old processes are gone. End yt-dlp, ffmpeg and aria2c in Task Manager, then confirm.',
   retry: 'Retry',
   theyAreGone: 'They are gone',
   confirmStraysGone: 'Are yt-dlp, ffmpeg and aria2c no longer listed in Task Manager? The cut-off downloads can then be resumed.',

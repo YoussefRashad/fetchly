@@ -90,7 +90,7 @@ function daemonOn(on: Aria2Rpc, alive: () => boolean = () => true): Aria2Daemon 
 }
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'hammel-file-'));
+  dir = mkdtempSync(join(tmpdir(), 'fetchly-file-'));
   rpc = new FakeAria2();
   events = [];
   engine = makeEngine();

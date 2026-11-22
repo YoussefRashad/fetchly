@@ -24,17 +24,17 @@ export function App() {
   const [pending, setPending] = useState<BannerAction | null>(null);
 
   const refresh = useCallback(async () => {
-    setSnapshot(await window.hammel.snapshot());
+    setSnapshot(await window.fetchly.snapshot());
   }, []);
 
   useEffect(() => {
-    const stopChanged = window.hammel.onChanged(setSnapshot);
+    const stopChanged = window.fetchly.onChanged(setSnapshot);
     // Subscribe first, then ask: the status is state, so whichever answer arrives last is current.
-    const stopStatus = window.hammel.onStatus(setStatus);
-    void window.hammel.status().then(setStatus);
+    const stopStatus = window.fetchly.onStatus(setStatus);
+    void window.fetchly.status().then(setStatus);
     void refresh();
-    void window.hammel.getSettings().then(setSettings);
-    void window.hammel.startupNotice().then((n) => n && setMessage(n));
+    void window.fetchly.getSettings().then(setSettings);
+    void window.fetchly.startupNotice().then((n) => n && setMessage(n));
     return () => {
       stopChanged();
       stopStatus();
@@ -45,7 +45,7 @@ export function App() {
     if (action === 'confirmStraysGone' && !window.confirm(S.confirmStraysGone)) return;
     setPending(action);
     try {
-      const res = await window.hammel[action]();
+      const res = await window.fetchly[action]();
       if (!res.ok) setMessage(res.error);
     } finally {
       setPending(null);
@@ -57,7 +57,7 @@ export function App() {
     return (
       <InstallScreen
         onInstalled={() => {
-          void window.hammel.status().then(setStatus);
+          void window.fetchly.status().then(setStatus);
           void refresh();
         }}
       />

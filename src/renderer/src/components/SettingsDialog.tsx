@@ -18,19 +18,19 @@ export function SettingsDialog({ settings, onSaved, onClose }: Props) {
   const [updateNote, setUpdateNote] = useState<string | null>(null);
 
   useEffect(() => {
-    void window.hammel.binaries().then(setBins);
+    void window.fetchly.binaries().then(setBins);
   }, []);
 
   const set = <K extends keyof Settings>(key: K, value: Settings[K]) => setDraft((d) => ({ ...d, [key]: value }));
 
   async function browse() {
-    const picked = await window.hammel.pickFolder();
+    const picked = await window.fetchly.pickFolder();
     if (picked) set('downloadDir', picked);
   }
 
   async function save() {
     setError(null);
-    const res = await window.hammel.setSettings({ ...draft, subtitleLangs: parseLangs(langs) });
+    const res = await window.fetchly.setSettings({ ...draft, subtitleLangs: parseLangs(langs) });
     if (!res.ok) return setError(res.error);
     onSaved(res.value);
     onClose();
@@ -39,10 +39,10 @@ export function SettingsDialog({ settings, onSaved, onClose }: Props) {
   async function update() {
     setUpdating(true);
     setUpdateNote(null);
-    const res = await window.hammel.updateYtDlp();
+    const res = await window.fetchly.updateYtDlp();
     setUpdating(false);
     setUpdateNote(res.ok ? S.updatedTo(res.value) : res.error);
-    void window.hammel.binaries().then(setBins);
+    void window.fetchly.binaries().then(setBins);
   }
 
   return (

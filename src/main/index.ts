@@ -25,7 +25,7 @@ function createWindow(): BrowserWindow {
     height: 650,
     minWidth: 760,
     minHeight: 480,
-    title: 'Hammel',
+    title: 'Fetchly',
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -80,7 +80,7 @@ async function main(): Promise<void> {
   let saveError: string | null = null;
 
   const appStatus = (): AppStatus => ({ engine: engines.status(), saveError });
-  const pushStatus = (): void => send('hammel:status', appStatus());
+  const pushStatus = (): void => send('fetchly:status', appStatus());
 
   // Construct, wire and dispose the queue (F2). After a queue whose wiring failed, the next one
   // starts from that queue's final list, not from the list read at start.
@@ -128,7 +128,7 @@ async function main(): Promise<void> {
     validateUrl,
     probe: (url) => probeUrl(url, { command: binaries.path('yt-dlp'), prefixArgs: [] }),
     binaries,
-    onInstallProgress: (name, pct) => send('hammel:installProgress', name, pct),
+    onInstallProgress: (name, pct) => send('fetchly:installProgress', name, pct),
     afterInstall: () => engines.start(),
     pickFolder: async () => {
       if (!win) return null;
@@ -148,7 +148,7 @@ async function main(): Promise<void> {
   });
 
   for (const [name, handler] of Object.entries(handlers)) {
-    ipcMain.handle(`hammel:${name}`, (_event, ...args: unknown[]) => (handler as (...a: unknown[]) => unknown)(...args));
+    ipcMain.handle(`fetchly:${name}`, (_event, ...args: unknown[]) => (handler as (...a: unknown[]) => unknown)(...args));
   }
 
   showWindow();

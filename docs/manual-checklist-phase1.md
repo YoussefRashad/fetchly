@@ -4,8 +4,8 @@ The automated tests never touch the external network or the real tools. These ch
 do, so they are run by hand with real links. Tick each one; note anything
 that differs from "Expected".
 
-Start from a clean profile for check 1: quit Hammel from the tray and delete
-`%APPDATA%\hammel`.
+Start from a clean profile for check 1: quit Fetchly from the tray and delete
+`%APPDATA%\fetchly`.
 
 | # | Do | Expected |
 | --- | --- | --- |
@@ -18,7 +18,7 @@ Start from a clean profile for check 1: quit Hammel from the tray and delete
 | 7 | Add a video whose title has Arabic text or characters like `: ? "`. | File is created with a readable name; the Arabic is intact. |
 | 8 | Pause a large video at about 30%, wait, resume. | It continues from about 30%, not from 0. |
 | 9 | Pause a download, **Quit** from the tray, start the app, resume. | It continues from where it stopped. |
-| 10 | While a download runs, end `electron.exe`/Hammel from Task Manager. Start the app. | The job is `paused`. Resume continues it. No `yt-dlp.exe` or `ffmpeg.exe` is left running from before. |
+| 10 | While a download runs, end `electron.exe`/Fetchly from Task Manager. Start the app. | The job is `paused`. Resume continues it. No `yt-dlp.exe` or `ffmpeg.exe` is left running from before. |
 | 11 | Add a large direct file (a public PDF or zip of 100 MB+). | Several connections (noticeably faster than a browser on a throttled server); pause and resume continue; the file opens. |
 | 12 | Add the same direct file again while the first is in the list. | The second is named `name (2).ext`. |
 | 13 | Paste the address of an ordinary web page that has no video. | "this link is a web page, not a file". Nothing is added. |
@@ -28,7 +28,7 @@ Start from a clean profile for check 1: quit Hammel from the tray and delete
 | 17 | Set a speed limit of 500 KB/s, start two downloads. | One video and one file together stay near 500 KB/s in total. Changing the limit while they run restarts the video, which continues. |
 | 18 | Set "Downloads at the same time" to 1, add a playlist. | One item downloads at a time; the rest are `queued`. |
 | 19 | Close the window during a download. | The download continues; the tray icon is there; its tooltip shows the count; a notification appears when it finishes and clicking it opens the window. |
-| 20 | Tray menu: Pause all, Resume all, Open, Quit. | Each does what it says. After Quit no Hammel, `aria2c.exe` or `yt-dlp.exe` process remains. Quit during "finishing…" leaves no yt-dlp or ffmpeg process; the job is `paused` at next start and Resume finishes it. |
+| 20 | Tray menu: Pause all, Resume all, Open, Quit. | Each does what it says. After Quit no Fetchly, `aria2c.exe` or `yt-dlp.exe` process remains. Quit during "finishing…" leaves no yt-dlp or ffmpeg process; the job is `paused` at next start and Resume finishes it. |
 | 21 | Cancel a half-downloaded video, then look in the folder. | No `.part` or `.ytdl` leftovers for it; other files untouched. |
 | 22 | On a finished download: Open, Open folder, Delete file. | Opens in the default player; Explorer shows the file selected; Delete asks first and then removes the file. |
 | 23 | Settings → **Update yt-dlp**. | Shows the new version, or a clear error; downloading still works afterwards. |
@@ -36,12 +36,12 @@ Start from a clean profile for check 1: quit Hammel from the tray and delete
 | 25 | Add a playlist item with **Best available** (the height check runs first). | The file follows the rule of check 4 for that item's height. Note the delay before the download starts. |
 | 26 | Turn on "Always save as mp4", add a video from a source that is not mp4 (for example a webm-only site). | A playable `.mp4` (remux). |
 | 27 | Add a video as **Audio only (mp3)** when the output file already exists; then pause one and resume it. | Both give a working `.mp3` (`-x` with the printed path). |
-| 28a | Quit the app from the tray, rename `aria2c.exe` in `%APPDATA%\hammel\bin` to `aria2c.exe.bak`, start the app. Then restore the file name and press **Install**. | The setup screen shows, not the engine banner. After Install nothing is downloaded and the list appears. |
-| 28b | Quit the app from the tray. In `%APPDATA%\hammel\bin` rename `aria2c.exe` to `aria2c.exe.bak` and create an empty file named `aria2c.exe` in its place (all three tools still count as installed, but aria2 cannot start). Start the app. Then, with the app still running, delete the empty `aria2c.exe`, rename `aria2c.exe.bak` back to `aria2c.exe`, and press **Retry** in the banner. | No setup screen: the engine banner shows with Retry, its text starting "The download tools could not be started". After Retry the banner goes and Add works. |
+| 28a | Quit the app from the tray, rename `aria2c.exe` in `%APPDATA%\fetchly\bin` to `aria2c.exe.bak`, start the app. Then restore the file name and press **Install**. | The setup screen shows, not the engine banner. After Install nothing is downloaded and the list appears. |
+| 28b | Quit the app from the tray. In `%APPDATA%\fetchly\bin` rename `aria2c.exe` to `aria2c.exe.bak` and create an empty file named `aria2c.exe` in its place (all three tools still count as installed, but aria2 cannot start). Start the app. Then, with the app still running, delete the empty `aria2c.exe`, rename `aria2c.exe.bak` back to `aria2c.exe`, and press **Retry** in the banner. | No setup screen: the engine banner shows with Retry, its text starting "The download tools could not be started". After Retry the banner goes and Add works. |
 | 29 | During a file download, end `aria2c.exe` in Task Manager. Then press **Retry** in the banner. | The banner shows and videos keep running. After Retry the banner goes and the file download continues after its own Retry. |
 | 30 | End `aria2c.exe` and do not restart it; let queued file downloads run out their retries. Then press **Retry** in the banner. | The queued file downloads fail after their retries (known limit). After the banner's Retry each one needs Retry. |
-| 31 | During a download make `%APPDATA%\hammel\jobs.json` unwritable, then writable. Also start the app with the file unwritable. | The save banner appears and downloads continue. Once the file is writable the banner goes within a minute. With the file unwritable at start the banner is there from the start. |
-| 32 | Kill Hammel during a download, then start it. Repeat with the leftover-process check made to fail (your choice of method). | First run: no old tool process remains and Resume works. Second run: the cut-off banner shows, Resume is refused, and "They are gone" enables it. |
+| 31 | During a download make `%APPDATA%\fetchly\jobs.json` unwritable, then writable. Also start the app with the file unwritable. | The save banner appears and downloads continue. Once the file is writable the banner goes within a minute. With the file unwritable at start the banner is there from the start. |
+| 32 | Kill Fetchly during a download, then start it. Repeat with the leftover-process check made to fail (your choice of method). | First run: no old tool process remains and Resume works. Second run: the cut-off banner shows, Resume is refused, and "They are gone" enables it. |
 | 33 | Press Pause all twice quickly, then Resume all, with file downloads running. | Each file download runs once. |
 | 34 | Pause a video during its download (no joining step) and look in Task Manager at once. | No `yt-dlp.exe` and no `ffmpeg.exe` from the app's folder remains. The stop counts as confirmed when yt-dlp has closed; an ffmpeg that outlives it is a finding. |
 | 35 | Delete file on a finished video that is open in a player. | The row stays with a reason. |

@@ -1,8 +1,8 @@
-import type { HammelApi } from '../../shared/types';
+import type { FetchlyApi } from '../../shared/types';
 
 declare global {
   interface Window {
-    hammel: HammelApi;
+    fetchly: FetchlyApi;
   }
 }
 

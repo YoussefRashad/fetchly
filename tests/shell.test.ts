@@ -28,13 +28,13 @@ describe('finishedMessage', () => {
 
 describe('trayTooltip', () => {
   it('is just the name when nothing is running', () => {
-    expect(trayTooltip({ jobs: [makeJob({ state: 'paused' }), makeJob({ state: 'done' })], groups: [] })).toBe('Hammel');
-    expect(trayTooltip({ jobs: [], groups: [] })).toBe('Hammel');
+    expect(trayTooltip({ jobs: [makeJob({ state: 'paused' }), makeJob({ state: 'done' })], groups: [] })).toBe('Fetchly');
+    expect(trayTooltip({ jobs: [], groups: [] })).toBe('Fetchly');
   });
 
   it('counts the downloads that are running', () => {
     const jobs = [makeJob({ state: 'downloading' }), makeJob({ state: 'probing' }), makeJob({ state: 'queued' }), makeJob({ state: 'paused' })];
-    expect(trayTooltip({ jobs, groups: [] })).toBe('Hammel · 2 downloading');
+    expect(trayTooltip({ jobs, groups: [] })).toBe('Fetchly · 2 downloading');
   });
 });
 

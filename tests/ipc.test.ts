@@ -116,7 +116,7 @@ const request = (over: Partial<AddRequest> = {}): AddRequest => ({
 });
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'hammel-ipc-'));
+  dir = mkdtempSync(join(tmpdir(), 'fetchly-ipc-'));
   added = [];
   verbs = [];
   snapshot = { jobs: [], groups: [] };
@@ -677,7 +677,7 @@ describe('what add accepts loads again from disk', () => {
   let dataDir: string;
 
   beforeEach(() => {
-    dataDir = mkdtempSync(join(tmpdir(), 'hammel-ipc-data-'));
+    dataDir = mkdtempSync(join(tmpdir(), 'fetchly-ipc-data-'));
   });
   afterEach(() => {
     rmSync(dataDir, { recursive: true, force: true });
@@ -753,7 +753,7 @@ describe('add refuses an array with a hole and leaves the real queue and its fil
   let dataDir: string;
 
   beforeEach(() => {
-    dataDir = mkdtempSync(join(tmpdir(), 'hammel-ipc-data-'));
+    dataDir = mkdtempSync(join(tmpdir(), 'fetchly-ipc-data-'));
   });
   afterEach(() => {
     rmSync(dataDir, { recursive: true, force: true });
@@ -1007,8 +1007,8 @@ describe('job and group results (9.3)', () => {
   });
 
   it('passes on the text of a queue that is closing', async () => {
-    verbResult = { ok: false, error: 'Hammel is closing' };
-    expect(await createHandlers(deps()).job('j1', 'resume')).toEqual({ ok: false, error: 'Hammel is closing' });
+    verbResult = { ok: false, error: 'Fetchly is closing' };
+    expect(await createHandlers(deps()).job('j1', 'resume')).toEqual({ ok: false, error: 'Fetchly is closing' });
   });
 
   it.each(JOB_VERBS_ALL)('answers ok for a job verb %s that worked', async (verb) => {
@@ -1299,7 +1299,7 @@ describe('with the real handlers, Queue and Store (C1, C2, C3)', () => {
   let realData: string;
 
   beforeEach(() => {
-    realData = mkdtempSync(join(tmpdir(), 'hammel-ipc-real-'));
+    realData = mkdtempSync(join(tmpdir(), 'fetchly-ipc-real-'));
   });
   afterEach(() => {
     rmSync(realData, { recursive: true, force: true });

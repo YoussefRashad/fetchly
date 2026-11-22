@@ -153,7 +153,7 @@ describe('parseProbe returns at most MAX_HEIGHTS heights (B3)', () => {
 
 describe('parseLine', () => {
   it('reads a progress line, using the estimate when the total is unknown', () => {
-    expect(parseLine('HAMMEL_PROGRESS 1048576 NA 4194304 250000.5 12')).toEqual({
+    expect(parseLine('FETCHLY_PROGRESS 1048576 NA 4194304 250000.5 12')).toEqual({
       type: 'progress',
       bytesDone: 1048576,
       bytesTotal: 4194304,
@@ -163,11 +163,11 @@ describe('parseLine', () => {
   });
 
   it('prefers the exact total over the estimate', () => {
-    expect(parseLine('HAMMEL_PROGRESS 10 100 999 5 1')).toMatchObject({ bytesTotal: 100 });
+    expect(parseLine('FETCHLY_PROGRESS 10 100 999 5 1')).toMatchObject({ bytesTotal: 100 });
   });
 
   it('reads a progress line where everything is unknown', () => {
-    expect(parseLine('HAMMEL_PROGRESS NA NA NA NA NA')).toEqual({
+    expect(parseLine('FETCHLY_PROGRESS NA NA NA NA NA')).toEqual({
       type: 'progress',
       bytesDone: 0,
       bytesTotal: null,
@@ -177,15 +177,15 @@ describe('parseLine', () => {
   });
 
   it('rounds a fractional estimate to whole bytes', () => {
-    expect(parseLine('HAMMEL_PROGRESS 10 NA 4194304.7 5 1')).toMatchObject({ bytesTotal: 4194305 });
+    expect(parseLine('FETCHLY_PROGRESS 10 NA 4194304.7 5 1')).toMatchObject({ bytesTotal: 4194305 });
   });
 
   it('ignores a progress line with missing fields', () => {
-    expect(parseLine('HAMMEL_PROGRESS 10 20')).toEqual({ type: 'other' });
+    expect(parseLine('FETCHLY_PROGRESS 10 20')).toEqual({ type: 'other' });
   });
 
   it('reads the final file line, keeping spaces in the path', () => {
-    expect(parseLine('HAMMEL_FILE 1080 D:\\Dl\\03 - My Video.mp4')).toEqual({
+    expect(parseLine('FETCHLY_FILE 1080 D:\\Dl\\03 - My Video.mp4')).toEqual({
       type: 'file',
       height: 1080,
       path: 'D:\\Dl\\03 - My Video.mp4',
@@ -193,11 +193,11 @@ describe('parseLine', () => {
   });
 
   it('reads a file line without a height (audio)', () => {
-    expect(parseLine('HAMMEL_FILE NA D:\\Dl\\song.mp3')).toEqual({ type: 'file', height: null, path: 'D:\\Dl\\song.mp3' });
+    expect(parseLine('FETCHLY_FILE NA D:\\Dl\\song.mp3')).toEqual({ type: 'file', height: null, path: 'D:\\Dl\\song.mp3' });
   });
 
   it('tolerates a trailing carriage return', () => {
-    expect(parseLine('HAMMEL_FILE 720 D:\\Dl\\a.mp4\r')).toMatchObject({ path: 'D:\\Dl\\a.mp4' });
+    expect(parseLine('FETCHLY_FILE 720 D:\\Dl\\a.mp4\r')).toMatchObject({ path: 'D:\\Dl\\a.mp4' });
   });
 
   it.each(['[Merger] Merging formats into "x.mp4"', '[ExtractAudio] Destination: x.mp3'])('sees %s as merging', (line) => {

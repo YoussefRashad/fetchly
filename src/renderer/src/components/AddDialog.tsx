@@ -36,14 +36,14 @@ export function AddDialog({ url, probe, settings, onClose }: Props) {
   }
 
   async function browse() {
-    const picked = await window.hammel.pickFolder();
+    const picked = await window.fetchly.pickFolder();
     if (picked) setDir(picked);
   }
 
   async function submit() {
     setBusy(true);
     setError(null);
-    const res = await window.hammel.add({
+    const res = await window.fetchly.add({
       url,
       probe,
       quality: probe.kind === 'file' ? null : decodeQuality(quality),

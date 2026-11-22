@@ -22,7 +22,7 @@ export function GroupRow({ group, members, visible, onError }: Props) {
 
   async function act(verb: GroupVerb) {
     if (verb === 'cancel' && !window.confirm(S.confirmCancelGroup(group.title))) return;
-    const res = await window.hammel.group(group.id, verb);
+    const res = await window.fetchly.group(group.id, verb);
     if (!res.ok) onError(res.error);
   }
 

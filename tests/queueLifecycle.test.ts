@@ -113,8 +113,8 @@ let downloads: string;
 beforeEach(() => {
   calls = [];
   stops = [];
-  dataDir = mkdtempSync(join(tmpdir(), 'hammel-life-data-'));
-  downloads = mkdtempSync(join(tmpdir(), 'hammel-life-dl-'));
+  dataDir = mkdtempSync(join(tmpdir(), 'fetchly-life-data-'));
+  downloads = mkdtempSync(join(tmpdir(), 'fetchly-life-dl-'));
 });
 
 /** A queued video, valid for the stored list. */
@@ -338,7 +338,7 @@ describe('queueLifecycle with a real Queue and Store (F2)', () => {
       expect(r.host.status()).toEqual(READY);
       expect(r.trayAttached).toEqual([q]);
       expect(r.saveStates).toEqual([null]);
-      expect(r.sent.at(-1)).toEqual({ channel: 'hammel:changed', args: [q?.snapshot()] });
+      expect(r.sent.at(-1)).toEqual({ channel: 'fetchly:changed', args: [q?.snapshot()] });
       expect(calls).toEqual(['start:v1']);
     });
 
@@ -348,7 +348,7 @@ describe('queueLifecycle with a real Queue and Store (F2)', () => {
       const before = r.sent.length;
       r.host.queue()?.confirmStraysGone();
       expect(r.sent.length).toBeGreaterThan(before);
-      expect(r.sent.at(-1)?.channel).toBe('hammel:changed');
+      expect(r.sent.at(-1)?.channel).toBe('fetchly:changed');
     });
 
     it('resumes paused jobs when autoResumeOnStart is on', async () => {

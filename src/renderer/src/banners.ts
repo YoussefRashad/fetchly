@@ -1,7 +1,7 @@
 import type { AppStatus, Snapshot } from '../../shared/types';
 import { S } from './strings';
 
-/** The HammelApi method a banner's button calls. */
+/** The FetchlyApi method a banner's button calls. */
 export type BannerAction = 'retryEngines' | 'confirmStraysGone';
 
 /** A persistent banner: it shows while its cause lasts and has no close button. */

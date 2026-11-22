@@ -123,7 +123,7 @@ function serveAll(): void {
 const leftovers = () => readdirSync(binDir).filter((n) => !/^(yt-dlp|ffmpeg|aria2c)\.exe$/.test(n));
 
 beforeEach(() => {
-  binDir = join(mkdtempSync(join(tmpdir(), 'hammel-bin-')), 'bin');
+  binDir = join(mkdtempSync(join(tmpdir(), 'fetchly-bin-')), 'bin');
   served = new Map();
   fetched = [];
   failOnce = new Map();

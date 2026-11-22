@@ -9,7 +9,7 @@ export { normalizeSettings };
 
 export function DEFAULT_SETTINGS(downloadsDir: string): Settings {
   return {
-    downloadDir: join(downloadsDir, 'Hammel'),
+    downloadDir: join(downloadsDir, 'Fetchly'),
     askEveryTime: false,
     maxConcurrent: 3,
     speedLimitKbps: 0,

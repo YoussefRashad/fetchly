@@ -98,7 +98,7 @@ const ended = () => events.find((e) => e.type === 'done' || e.type === 'error');
 const probedEvents = () => events.filter((e) => e.type === 'probed');
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'hammel-media-'));
+  dir = mkdtempSync(join(tmpdir(), 'fetchly-media-'));
   engine = new MediaEngine(FAKE, 'C:\\bin\\ffmpeg.exe');
   events = [];
   running = [];
