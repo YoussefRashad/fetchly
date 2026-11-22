@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell, type Tray } from 'electron';
 import type { Settings } from '../shared/types';
 import { Binaries } from './binaries';
 import { FileEngine, startAria2 } from './engines/file';
@@ -8,8 +8,10 @@ import { createHandlers, type Handlers } from './ipc';
 import { Queue } from './jobs/queue';
 import { Store } from './jobs/store';
 import { probeUrl, validateUrl } from './probe';
+import { attachQueue, createTray } from './shell';
 
 let win: BrowserWindow | null = null;
+let tray: Tray | null = null;
 let queue: Queue | null = null;
 let stopAria2: (() => Promise<void>) | null = null;
 let quitting = false;
@@ -35,6 +37,12 @@ function createWindow(): BrowserWindow {
     return { action: 'deny' };
   });
   w.webContents.on('will-navigate', (e) => e.preventDefault());
+  // Closing the window only hides it: downloads keep running, and Quit lives in the tray menu.
+  w.on('close', (e) => {
+    if (quitting) return;
+    e.preventDefault();
+    w.hide();
+  });
 
   const devUrl = process.env['ELECTRON_RENDERER_URL'];
   if (devUrl) void w.loadURL(devUrl);
@@ -73,6 +81,7 @@ async function main(): Promise<void> {
     const file = new FileEngine(aria2.rpc);
     queue = new Queue({ store, media, file, initial: loaded.snapshot, settings });
     queue.onChanged((s) => send('hammel:changed', s));
+    if (tray) attachQueue(tray, queue, showWindow);
     if (settings.autoResumeOnStart) queue.resumeAllPaused();
     send('hammel:changed', queue.snapshot());
   };
@@ -111,6 +120,7 @@ async function main(): Promise<void> {
   }
 
   showWindow();
+  tray = createTray({ showWindow, queue: () => queue, quit: () => app.quit() });
 
   const status = await binaries.status();
   if (status.every((b) => b.installed)) {
@@ -127,10 +137,6 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.on('second-instance', showWindow);
   void app.whenReady().then(main);
-
-  app.on('window-all-closed', () => {
-    app.quit();
-  });
 
   // Pause what is running so partial files are left in a resumable state, then let the app go.
   app.on('before-quit', (event) => {
