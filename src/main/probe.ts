@@ -116,7 +116,7 @@ async function probeFile(url: string, fetchImpl: typeof fetch): Promise<ProbeRes
     throw new ProbeError('this link is a web page, not a file');
   }
 
-  let size: number | null = null;
+  let size: number | null;
   if (res.status === 206) {
     const total = /\/(\d+)\s*$/u.exec(res.headers.get('content-range') ?? '')?.[1];
     size = total === undefined ? null : Number(total);
