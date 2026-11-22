@@ -15,6 +15,7 @@ export function makeJob(over: Partial<Job> = {}): Job {
     quality: { kind: 'best' },
     subtitleLangs: [],
     dir: 'D:\\Dl',
+    baseName: 'Video',
     fileName: null,
     index: null,
     bytesDone: 0,

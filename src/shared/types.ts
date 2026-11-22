@@ -30,6 +30,11 @@ export interface Job {
   quality: Quality | null;
   subtitleLangs: string[];
   dir: string;
+  /**
+   * File name without extension, fixed when the job is added so that pause and
+   * resume always address the same partial file. null for file jobs.
+   */
+  baseName: string | null;
   fileName: string | null;
   /** 1-based position in its group, null outside a group */
   index: number | null;
