@@ -7,6 +7,8 @@ Paste a link and Fetchly downloads a video, a whole playlist, or any direct
 file (PDF, zip, video file), with a choice of quality and pause/resume that
 survives closing the app or restarting the PC.
 
+![Fetchly downloading a playlist, a video and a direct file, with one download paused](docs/screenshots/downloads.png)
+
 Fetchly is a window, a queue and a process supervisor around three free
 tools that do the transfer work:
 
@@ -39,6 +41,16 @@ and lists such items as `skipped: protected`.
 - **No silent failures.** Every failed or skipped item says why, and banners
   explain engine, save and cut-off-download problems with a button to fix
   them.
+
+## Screenshots
+
+| Pick a quality for a video | Pick which playlist items to keep |
+| --- | --- |
+| ![Add dialog for a video, with its thumbnail and a quality of up to 1080p](docs/screenshots/add-video.png) | ![Add dialog for a playlist, with 5 of 18 items selected](docs/screenshots/add-playlist.png) |
+
+Shown: Blender Foundation open movies (CC BY), downloaded with the real
+tools. The main view above has a direct file done, a 1.1 GB direct file
+paused, a video downloading and a five-item playlist in progress.
 
 ## Engineering highlights
 
