@@ -98,6 +98,8 @@ export class Queue {
       resumable: true,
       attempts: 0,
       createdAt,
+      interrupted: false,
+      sourceHeight: null,
     };
     const probe = req.probe;
 

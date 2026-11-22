@@ -46,6 +46,14 @@ export interface Job {
   resumable: boolean;
   attempts: number;
   createdAt: number;
+  /**
+   * true = this job's last run was not confirmed stopped, and no check for leftover
+   * tool processes has succeeded or been confirmed since. Only ever true while the
+   * job is paused; while true, resume is refused.
+   */
+  interrupted: boolean;
+  /** Highest video height the site offered when probed; null = not known. */
+  sourceHeight: number | null;
 }
 
 export interface Group {

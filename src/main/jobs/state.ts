@@ -9,7 +9,11 @@ export type JobEvent =
   | { type: 'resume' }
   | { type: 'retry' }
   | { type: 'fail'; reason: string }
-  | { type: 'skip'; reason: string };
+  | { type: 'skip'; reason: string }
+  /** Quit stops a running job, merging included. */
+  | { type: 'interrupt' }
+  /** A new speed limit restarts a running job; it keeps its progress and attempts. */
+  | { type: 'requeue' };
 
 export class IllegalTransition extends Error {
   constructor(from: JobState, event: JobEvent['type']) {
@@ -31,6 +35,8 @@ const TABLE: Record<JobEvent['type'], Partial<Record<JobState, JobState>>> = {
   retry: { failed: 'queued' },
   fail: { queued: 'failed', probing: 'failed', downloading: 'failed', merging: 'failed' },
   skip: { queued: 'skipped', probing: 'skipped', downloading: 'skipped' },
+  interrupt: { probing: 'paused', downloading: 'paused', merging: 'paused' },
+  requeue: { probing: 'queued', downloading: 'queued' },
 };
 
 export function canApply(job: Job, type: JobEvent['type']): boolean {
@@ -48,7 +54,10 @@ export function transition(job: Job, ev: JobEvent): Job {
     case 'skip':
       return { ...next, reason: ev.reason, speed: 0, eta: null };
     case 'pause':
+    case 'interrupt':
       return { ...next, speed: 0, eta: null };
+    case 'requeue':
+      return { ...next, reason: null, speed: 0, eta: null };
     case 'resume':
       return { ...next, reason: null };
     case 'retry':

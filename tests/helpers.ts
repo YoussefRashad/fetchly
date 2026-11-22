@@ -26,6 +26,8 @@ export function makeJob(over: Partial<Job> = {}): Job {
     resumable: true,
     attempts: 0,
     createdAt: seq,
+    interrupted: false,
+    sourceHeight: null,
     ...over,
   };
 }

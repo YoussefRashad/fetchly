@@ -27,6 +27,11 @@ const table: [JobState, JobEvent, JobState][] = [
   ['queued', skip, 'skipped'],
   ['probing', skip, 'skipped'],
   ['downloading', skip, 'skipped'],
+  ['probing', { type: 'interrupt' }, 'paused'],
+  ['downloading', { type: 'interrupt' }, 'paused'],
+  ['merging', { type: 'interrupt' }, 'paused'],
+  ['probing', { type: 'requeue' }, 'queued'],
+  ['downloading', { type: 'requeue' }, 'queued'],
 ];
 
 describe('transition', () => {
@@ -74,6 +79,37 @@ describe('transition', () => {
   it('stops the meters when paused', () => {
     const next = transition(makeJob({ state: 'downloading', speed: 500, eta: 9 }), { type: 'pause' });
     expect(next).toMatchObject({ speed: 0, eta: null });
+  });
+
+  it('rejects requeue during the merge', () => {
+    expect(() => transition(makeJob({ state: 'merging' }), { type: 'requeue' })).toThrow(IllegalTransition);
+  });
+
+  it('rejects interrupting a job that is not running', () => {
+    for (const state of ['queued', 'paused', 'done', 'failed', 'skipped'] as const) {
+      expect(() => transition(makeJob({ state }), { type: 'interrupt' })).toThrow(IllegalTransition);
+    }
+  });
+
+  it('interrupt stops the meters and keeps the progress', () => {
+    const next = transition(makeJob({ state: 'merging', speed: 900, eta: 12, bytesDone: 70 }), { type: 'interrupt' });
+    expect(next).toMatchObject({ speed: 0, eta: null, bytesDone: 70 });
+  });
+
+  it('requeue keeps the progress and the attempts', () => {
+    const job = makeJob({ state: 'downloading', bytesDone: 50, attempts: 2, reason: 'old', speed: 400, eta: 3 });
+    expect(transition(job, { type: 'requeue' })).toMatchObject({
+      state: 'queued',
+      bytesDone: 50,
+      attempts: 2,
+      reason: null,
+      speed: 0,
+      eta: null,
+    });
+  });
+
+  it('starts new jobs not cut off and with no known source height', () => {
+    expect(makeJob()).toMatchObject({ interrupted: false, sourceHeight: null });
   });
 
   it('does not mutate the job it is given', () => {
