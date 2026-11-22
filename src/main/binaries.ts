@@ -2,7 +2,9 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createWriteStream, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { Readable, Transform, type Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import yauzl from 'yauzl';
 import type { BinName, BinStatus } from '../shared/types';
 
@@ -70,8 +72,55 @@ function runVersion(name: BinName, path: string): Promise<string | null> {
   });
 }
 
+function errorCode(err: unknown): string | undefined {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+/** The text for a write failure that people can act on: disk full, or a folder that refuses writes. */
+function knownWriteFailure(name: BinName, err: unknown): Error | null {
+  const code = errorCode(err);
+  if (code === 'ENOSPC') return new Error(`could not install ${name}: disk full`, { cause: err });
+  if (code === 'EACCES' || code === 'EPERM') return new Error(`could not install ${name}: cannot write to folder`, { cause: err });
+  return null;
+}
+
+/** Removes a file and never throws: a failed cleanup must not hide the error that caused it. */
+function removeQuietly(path: string): void {
+  try {
+    rmSync(path, { force: true });
+  } catch {
+    // A leftover beats a thrown error that replaces the real one.
+  }
+}
+
+/**
+ * `pipeline` that also says which end failed. Once one stream fails, `pipeline` destroys the others with the
+ * same error, so every stream reports it; only the first to report is the one that failed. Resolves with
+ * null on success and never rejects. `side` is null when the failure came from neither end.
+ */
+async function pipeTracked(
+  source: Readable,
+  middle: Transform[],
+  sink: Writable,
+): Promise<null | { side: 'read' | 'write' | null; error: unknown }> {
+  let side: 'read' | 'write' | null = null;
+  source.on('error', () => {
+    side ??= 'read';
+  });
+  sink.on('error', () => {
+    side ??= 'write';
+  });
+  try {
+    await pipeline(source, ...middle, sink);
+    return null;
+  } catch (error) {
+    return { side, error };
+  }
+}
+
 /** Copies one named file out of a zip to `dest`. Nothing else in the archive touches the disk. */
-function extractMember(zipPath: string, member: string, dest: string): Promise<boolean> {
+function extractMember(name: BinName, zipPath: string, member: string, dest: string): Promise<boolean> {
   return new Promise((resolve, reject) => {
     yauzl.open(zipPath, { lazyEntries: true }, (err, zip) => {
       if (err || !zip) return reject(err ?? new Error('cannot open archive'));
@@ -86,16 +135,13 @@ function extractMember(zipPath: string, member: string, dest: string): Promise<b
         found = true;
         zip.openReadStream(entry, (streamErr, stream) => {
           if (streamErr || !stream) return reject(streamErr ?? new Error('cannot read archive entry'));
-          pipeline(stream, createWriteStream(dest)).then(
-            () => {
-              zip.close();
-              resolve(true);
-            },
-            (e: unknown) => {
-              zip.close();
-              reject(e instanceof Error ? e : new Error(String(e)));
-            },
-          );
+          pipeTracked(stream, [], createWriteStream(dest)).then((failure) => {
+            zip.close();
+            if (failure === null) return resolve(true);
+            // Only a failed write gets the readable text; a damaged archive keeps its own error.
+            const known = failure.side === 'write' ? knownWriteFailure(name, failure.error) : null;
+            reject(known ?? (failure.error instanceof Error ? failure.error : new Error(String(failure.error))));
+          });
         });
       });
       zip.readEntry();
@@ -107,12 +153,17 @@ export interface BinariesOptions {
   fetchImpl?: typeof fetch;
   versionOf?: (name: BinName, path: string) => Promise<string | null>;
   aria2Sha256?: string;
+  /** Opens the file an asset is downloaded into. Used for the download only, not for a file taken out of an archive. */
+  createWrite?: (path: string) => Writable;
 }
 
 export class Binaries {
   private readonly fetchImpl: typeof fetch;
   private readonly versionOf: (name: BinName, path: string) => Promise<string | null>;
   private readonly aria2Sha256: string;
+  private readonly createWrite: (path: string) => Writable;
+  /** Tail of the install requests; never rejects. */
+  private chain: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly binDir: string,
@@ -121,6 +172,7 @@ export class Binaries {
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.versionOf = opts.versionOf ?? runVersion;
     this.aria2Sha256 = opts.aria2Sha256 ?? ARIA2_ZIP_SHA256;
+    this.createWrite = opts.createWrite ?? ((path) => createWriteStream(path));
   }
 
   path(name: BinName): string {
@@ -136,17 +188,34 @@ export class Binaries {
     );
   }
 
-  /** Installs only what is missing. */
-  async ensureAll(onProgress: (name: BinName, pct: number) => void): Promise<void> {
-    for (const name of NAMES) {
-      if (!existsSync(this.path(name))) await this.install(name, onProgress);
-    }
+  /**
+   * Runs `task` after every earlier install request has finished. The chain itself never rejects, so a failed
+   * run does not block the next one; the caller still gets the failure.
+   */
+  private serialized<T>(task: () => Promise<T>): Promise<T> {
+    const result = this.chain.then(task);
+    this.chain = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  /** Installs only what is missing. Requests run one at a time; a later one sees what an earlier one installed. */
+  ensureAll(onProgress: (name: BinName, pct: number) => void): Promise<void> {
+    return this.serialized(async () => {
+      for (const name of NAMES) {
+        if (!existsSync(this.path(name))) await this.install(name, onProgress);
+      }
+    });
   }
 
   /** Replaces yt-dlp with the latest release. A failed update leaves the current one in place. */
-  async updateYtDlp(): Promise<string> {
-    await this.install('yt-dlp', () => undefined);
-    return (await this.versionOf('yt-dlp', this.path('yt-dlp'))) ?? 'unknown';
+  updateYtDlp(): Promise<string> {
+    return this.serialized(async () => {
+      await this.install('yt-dlp', () => undefined);
+      return (await this.versionOf('yt-dlp', this.path('yt-dlp'))) ?? 'unknown';
+    });
   }
 
   private async install(name: BinName, onProgress: (name: BinName, pct: number) => void): Promise<void> {
@@ -166,15 +235,15 @@ export class Binaries {
       if (source.member === null) {
         renameSync(download, this.path(name));
       } else {
-        if (!(await extractMember(download, source.member, staged))) {
+        if (!(await extractMember(name, download, source.member, staged))) {
           throw new Error(`${source.member} was not found in the ${name} archive`);
         }
         renameSync(staged, this.path(name));
       }
       onProgress(name, 100);
     } finally {
-      rmSync(download, { force: true });
-      rmSync(staged, { force: true });
+      removeQuietly(download);
+      removeQuietly(staged);
     }
   }
 
@@ -184,17 +253,24 @@ export class Binaries {
     if (!res.body) throw new Error(`could not download ${name}: empty answer`);
     const total = Number(res.headers.get('content-length') ?? 0);
     const hash = createHash('sha256');
-    const out = createWriteStream(dest);
     let received = 0;
-    try {
-      for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+    const measure = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
         hash.update(chunk);
         received += chunk.length;
-        if (!out.write(chunk)) await new Promise<void>((r) => out.once('drain', () => r()));
         if (total > 0) onPct(Math.floor((received / total) * 100));
+        callback(null, chunk);
+      },
+    });
+    const source = Readable.fromWeb(res.body as unknown as WebReadableStream<Uint8Array>);
+    const failure = await pipeTracked(source, [measure], this.createWrite(dest));
+    if (failure !== null) {
+      if (failure.side === 'read') throw new Error(`could not download ${name}: the connection was lost`, { cause: failure.error });
+      if (failure.side === 'write') {
+        const message = failure.error instanceof Error ? failure.error.message : String(failure.error);
+        throw knownWriteFailure(name, failure.error) ?? new Error(`could not install ${name}: ${message}`, { cause: failure.error });
       }
-    } finally {
-      await new Promise<void>((r) => out.end(() => r()));
+      throw failure.error;
     }
     return hash.digest('hex');
   }
