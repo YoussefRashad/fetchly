@@ -1,21 +1,54 @@
 import { randomUUID } from 'node:crypto';
 import { readdirSync, rmSync } from 'node:fs';
-import { extname, join } from 'node:path';
-import type { AddRequest, Group, GroupVerb, Job, JobVerb, Settings, Snapshot } from '../../shared/types';
+import { extname, join, win32 } from 'node:path';
+import type { AddRequest, Group, GroupVerb, Job, JobVerb, Result, Settings, Snapshot } from '../../shared/types';
 import type { Engine, EngineEvent } from '../engines/engine';
-import { itemBaseName, sanitizeName, uniqueName } from '../naming';
+import { dirKey, freeName, itemBaseName, nameConflicts, sanitizeName } from '../naming';
 import { ACTIVE, canApply, transition, type JobEvent } from './state';
 import type { Store } from './store';
 import { isUsableDoneName } from './validate';
 
 export const RETRY_DELAYS_MS = [5000, 20000, 60000];
+/** While the last save failed, the save is tried again after this delay (OQ2). */
+export const SAVE_RETRY_MS = 60000;
 const MAX_ATTEMPTS = RETRY_DELAYS_MS.length;
 const NOTIFY_EVERY_MS = 250;
 const SAVE_PROGRESS_EVERY_MS = 5000;
 
+const PAUSE_NOT_CONFIRMED = 'Could not confirm that the download stopped. It is still listed as running; try again.';
+const CANCEL_NOT_CONFIRMED = 'Could not confirm that the download stopped, so nothing was deleted. It is still in the list; try again.';
+const CLOSING = 'Hammel is closing';
+const CUT_OFF =
+  'This download was cut off and Hammel could not check that its old process is gone. End yt-dlp, ffmpeg and aria2c in Task Manager, then choose "They are gone" in the banner, or restart Hammel.';
+
+const ok = (): Result<null> => ({ ok: true, value: null });
+const fail = (error: string): Result<null> => ({ ok: false, error });
+const noop = (): void => undefined;
+
 /** A finite, non-negative number, else null. */
 function count(v: number | null): number | null {
   return v !== null && Number.isFinite(v) && v >= 0 ? v : null;
+}
+
+/** A height the stored list accepts: a finite number > 0. */
+function isHeight(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0;
+}
+
+/** The largest storable height of a probe's list, or null. Tolerant of any value: the checks are the handler's. */
+function largestHeight(list: unknown): number | null {
+  if (!Array.isArray(list)) return null;
+  let best: number | null = null;
+  // An index loop: a hole reads as undefined and is skipped.
+  for (let i = 0; i < list.length; i += 1) {
+    const v: unknown = list[i];
+    if (isHeight(v) && (best === null || v > best)) best = v;
+  }
+  return best;
+}
+
+function messageOf(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 export interface Finished {
@@ -28,14 +61,22 @@ export interface Finished {
 export interface QueueDeps {
   store: Store;
   media: Engine;
-  file: Engine & { setGlobalLimit?(bytesPerSec: number): Promise<void> };
+  file: Engine & { setRateLimit(jobId: string, bytesPerSec: number | null): Promise<void> };
   initial: Snapshot;
   settings: Settings;
+  /** true = the check for tool processes left by an earlier run succeeded, so no job is cut off. Default true. */
+  straysCleared?: boolean;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
 }
 
 const TERMINAL = new Set(['done', 'failed', 'skipped']);
+
+/** The names already used in one folder during one `add` call. */
+interface FolderNames {
+  claims: string[];
+  disk: string[];
+}
 
 export class Queue {
   private jobs: Job[];
@@ -47,26 +88,38 @@ export class Queue {
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
 
-  /** Jobs that are queued but must wait for their retry delay. */
-  private readonly waiting = new Set<string>();
+  /** Jobs that are queued but must wait for their retry delay, with the token of that wait. */
+  private readonly waiting = new Map<string, number>();
+  private waitToken = 0;
+  /** Jobs whose cancel is waiting for the engine: never started meanwhile. */
+  private readonly cancelling = new Set<string>();
+  /** Per job, the tail of its verb chain. */
+  private readonly chains = new Map<string, Promise<void>>();
+  /** Per active job, the rate limit (bytes/s, null = none) it runs with. */
+  private readonly limits = new Map<string, number | null>();
   private readonly changedListeners: ((s: Snapshot) => void)[] = [];
   private readonly finishedListeners: ((e: Finished) => void)[] = [];
+  private readonly saveListeners: ((error: string | null) => void)[] = [];
   private lastNotify = 0;
   private notifyPending = false;
   private lastSave = 0;
+  private saveError: string | null = null;
+  private saveRetryPending = false;
+  private closed = false;
+  private closing: Promise<void> | null = null;
 
   constructor(deps: QueueDeps) {
     this.store = deps.store;
     this.media = deps.media;
     this.file = deps.file;
     this.jobs = [...deps.initial.jobs];
+    if (deps.straysCleared ?? true) this.jobs = this.jobs.map((j) => (j.interrupted ? { ...j, interrupted: false } : j));
     this.groups = [...deps.initial.groups];
     this.settings = deps.settings;
     this.now = deps.now ?? Date.now;
     this.setTimer = deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.media.on((ev) => this.onEngineEvent(ev));
     this.file.on((ev) => this.onEngineEvent(ev));
-    this.applyGlobalLimit();
     this.commit();
   }
 
@@ -82,10 +135,16 @@ export class Queue {
     this.finishedListeners.push(listener);
   }
 
+  /** Calls the listener at once with the current save error (null = the last save worked), then on every change. */
+  onSaveState(listener: (error: string | null) => void): void {
+    this.saveListeners.push(listener);
+    listener(this.saveError);
+  }
+
   setSettings(s: Settings): void {
     this.settings = s;
-    this.applyGlobalLimit();
     this.commit();
+    this.retune();
   }
 
   add(req: AddRequest): void {
@@ -108,6 +167,20 @@ export class Queue {
       sourceHeight: null,
     };
     const probe = req.probe;
+    const folders = new Map<string, FolderNames>();
+    /** A free name in `dir`; when `claim`, it joins the claims for the next item of this call. */
+    const name = (dir: string, stem: string, ext: string, claim = true): string => {
+      const key = dirKey(dir);
+      let names = folders.get(key);
+      if (!names) {
+        names = { claims: this.claimsIn(key), disk: this.diskNames(dir) };
+        folders.set(key, names);
+      }
+      const known = names;
+      const free = freeName(stem, ext, (n) => nameConflicts(n, known.claims, known.disk));
+      if (claim) known.claims.push(free);
+      return free;
+    };
 
     if (probe.kind === 'file') {
       const ext = extname(probe.fileName);
@@ -122,7 +195,7 @@ export class Queue {
         subtitleLangs: [],
         dir: req.dir,
         baseName: null,
-        fileName: uniqueName(stem, ext.slice(1), this.takenFileNames(req.dir)),
+        fileName: name(req.dir, stem, ext.slice(1)),
         index: null,
         bytesTotal: probe.size,
         resumable: probe.resumable,
@@ -136,10 +209,12 @@ export class Queue {
         title: probe.title,
         quality: req.quality ?? this.settings.defaultQuality,
         dir: req.dir,
-        baseName: uniqueName(itemBaseName(probe.title, null, null), '', this.takenBaseNames(req.dir)),
+        baseName: name(req.dir, itemBaseName(probe.title, null, null), ''),
         index: null,
+        sourceHeight: largestHeight(probe.heights),
       });
     } else {
+      // The folder name is not made unique: adding a playlist twice puts both in one folder.
       const group: Group = { id: randomUUID(), title: probe.title, url: req.url, dir: join(req.dir, sanitizeName(probe.title)), createdAt };
       const selected = req.selectedIndexes === null ? null : new Set(req.selectedIndexes);
       // Pad by the size of the whole playlist so numbers match the site whatever was selected.
@@ -157,10 +232,11 @@ export class Queue {
           title: entry.title,
           // Shown in the list so nobody wonders where item N went.
           state: entry.unavailable ? 'skipped' : 'queued',
-          reason: entry.unavailable ? 'unavailable' : null,
+          reason: entry.unavailable ? (entry.reason ?? 'unavailable') : null,
           quality: req.quality ?? this.settings.defaultQuality,
           dir: group.dir,
-          baseName: uniqueName(itemBaseName(entry.title, entry.index, total), '', this.takenBaseNames(group.dir)),
+          // A skipped placeholder holds no name.
+          baseName: name(group.dir, itemBaseName(entry.title, entry.index, total), '', !entry.unavailable),
           index: entry.index,
         });
       }
@@ -169,74 +245,196 @@ export class Queue {
     this.commit();
   }
 
-  async job(id: string, verb: JobVerb): Promise<void> {
-    await this.applyVerb(id, verb);
-    this.commit();
+  /** Runs the verb after the job's earlier verbs; ok when it did its work or had nothing to do. */
+  job(id: string, verb: JobVerb): Promise<Result<null>> {
+    if (this.closed) return Promise.resolve(fail(CLOSING));
+    return this.enqueue(id, () => this.runVerb(id, verb, false));
   }
 
-  async group(id: string, verb: GroupVerb): Promise<void> {
+  /** One verb per member, each on its member's chain; the first error, else ok. */
+  async group(id: string, verb: GroupVerb): Promise<Result<null>> {
+    if (this.closed) return fail(CLOSING);
     const members = this.jobs.filter((j) => j.groupId === id).map((j) => j.id);
-    if (verb === 'cancel') {
-      await Promise.all(members.map((m) => (this.find(m)?.state === 'done' ? this.applyVerb(m, 'remove') : this.applyVerb(m, 'cancel'))));
-      this.groups = this.groups.filter((g) => g.id !== id);
-    } else {
-      await Promise.all(members.map((m) => this.applyVerb(m, verb)));
-    }
-    this.commit();
+    const results = await Promise.all(members.map((m) => this.enqueue(m, () => this.runVerb(m, verb, true))));
+    return results.find((r) => !r.ok) ?? ok();
   }
 
+  /** Resumes every paused job that was not cut off. */
   resumeAllPaused(): void {
-    for (const job of this.jobs) if (job.state === 'paused') this.apply(job.id, { type: 'resume' });
-    this.commit();
+    if (this.closed) return;
+    for (const job of this.jobs) {
+      if (job.state === 'paused') void this.enqueue(job.id, () => this.resumeVerb(job.id, true));
+    }
   }
 
   async pauseAll(): Promise<void> {
-    await Promise.all(this.jobs.map((j) => this.applyVerb(j.id, 'pause')));
+    await Promise.all(this.jobs.map((j) => this.enqueue(j.id, () => this.pauseVerb(j.id))));
+  }
+
+  /**
+   * Quit: every active job is marked paused and cut off and saved so, then its engine is
+   * stopped; each confirmed stop clears the mark. Resolves when every stop has settled.
+   */
+  shutdown(): Promise<void> {
+    this.closing ??= this.close();
+    return this.closing;
+  }
+
+  /** The owner confirmed that no tool process of an earlier run is left: no job is cut off any more. */
+  confirmStraysGone(): void {
+    this.jobs = this.jobs.map((j) => (j.interrupted ? { ...j, interrupted: false } : j));
     this.commit();
+  }
+
+  // ---- verbs ----
+
+  /** Chains `run` behind the job's earlier verbs. It starts on a later microtask, never in this tick. */
+  private enqueue(id: string, run: () => Promise<Result<null>>): Promise<Result<null>> {
+    const previous = this.chains.get(id) ?? Promise.resolve();
+    // A verb still waiting when closing started does nothing.
+    const result = previous.then(() => (this.closed ? fail(CLOSING) : run()));
+    const tail = result.then(noop, noop);
+    this.chains.set(id, tail);
+    void tail.then(() => {
+      if (this.chains.get(id) === tail) this.chains.delete(id);
+    });
+    return result;
+  }
+
+  private runVerb(id: string, verb: JobVerb, inGroup: boolean): Promise<Result<null>> {
+    switch (verb) {
+      case 'pause':
+        return this.pauseVerb(id);
+      case 'resume':
+        return this.resumeVerb(id, inGroup);
+      case 'retry':
+        return this.retryVerb(id);
+      case 'cancel':
+        // A group cancel removes finished members' rows and keeps their files; it announces nothing.
+        if (inGroup && this.find(id)?.state === 'done') return this.removeVerb(id, false);
+        return this.cancelVerb(id, !inGroup);
+      case 'remove':
+        return this.removeVerb(id, false);
+      case 'removeWithFile':
+        return this.removeVerb(id, true);
+      default:
+        return Promise.resolve(ok());
+    }
+  }
+
+  private async pauseVerb(id: string): Promise<Result<null>> {
+    const job = this.find(id);
+    if (!job || !canApply(job, 'pause')) return ok();
+    if (ACTIVE.has(job.state)) {
+      // Stop first: the slot is freed only once the engine has released the job.
+      try {
+        await this.engineOf(job).stop(id);
+      } catch {
+        return fail(PAUSE_NOT_CONFIRMED);
+      }
+    }
+    this.waiting.delete(id);
+    this.apply(id, { type: 'pause' });
+    this.commit();
+    return ok();
+  }
+
+  /** `skipCutOff`: a group resume and resumeAllPaused pass over a cut-off job instead of refusing. */
+  private async resumeVerb(id: string, skipCutOff: boolean): Promise<Result<null>> {
+    const job = this.find(id);
+    if (!job || !canApply(job, 'resume')) return ok();
+    if (job.interrupted) return skipCutOff ? ok() : fail(CUT_OFF);
+    this.apply(id, { type: 'resume' });
+    this.commit();
+    return ok();
+  }
+
+  private async retryVerb(id: string): Promise<Result<null>> {
+    const job = this.find(id);
+    if (!job || !canApply(job, 'retry')) return ok();
+    this.apply(id, { type: 'retry' });
+    this.commit();
+    return ok();
+  }
+
+  private async cancelVerb(id: string, announce: boolean): Promise<Result<null>> {
+    const job = this.find(id);
+    if (!job || job.state === 'done') return ok();
+    const wasTerminal = TERMINAL.has(job.state);
+    this.cancelling.add(id);
+    try {
+      await this.engineOf(job).discard(job);
+    } catch {
+      this.cancelling.delete(id);
+      // The row stays; a queued job held back meanwhile may take a free slot again.
+      if (this.find(id)?.state === 'queued') this.commit();
+      return fail(CANCEL_NOT_CONFIRMED);
+    }
+    this.cancelling.delete(id);
+    this.waiting.delete(id);
+    this.remove(id);
+    this.commit();
+    if (announce && !wasTerminal) this.announceGroupAfterCancel(job.groupId);
+    return ok();
+  }
+
+  private async removeVerb(id: string, withFile: boolean): Promise<Result<null>> {
+    const job = this.find(id);
+    if (!job || !TERMINAL.has(job.state)) return ok();
+    if (withFile && job.state === 'done' && job.fileName !== null) {
+      try {
+        // No force and no recursive: a folder in the file's place is refused and left intact.
+        rmSync(join(job.dir, job.fileName));
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException | null)?.code !== 'ENOENT') return fail(`Could not delete the file: ${messageOf(e)}`);
+      }
+    }
+    this.remove(id);
+    this.commit();
+    return ok();
+  }
+
+  /** A limit restart, queued by setSettings. It looks again when it runs; a stop that is not confirmed leaves the job running. */
+  private async restartVerb(id: string): Promise<Result<null>> {
+    const job = this.find(id);
+    if (!job || job.kind !== 'media' || (job.state !== 'probing' && job.state !== 'downloading')) return ok();
+    if (this.limits.get(id) === this.share()) return ok();
+    try {
+      await this.media.stop(id);
+    } catch {
+      return ok(); // keeps its old limit; the next settings change tries again
+    }
+    this.apply(id, { type: 'requeue' });
+    this.commit();
+    return ok();
   }
 
   // ---- internals ----
 
-  private async applyVerb(id: string, verb: JobVerb): Promise<void> {
-    const job = this.find(id);
-    if (!job) return;
-    switch (verb) {
-      case 'pause': {
-        if (!canApply(job, 'pause')) return;
-        // Stop first: the engine goes quiet at once, and a quick resume cannot meet a process that is still dying.
-        if (ACTIVE.has(job.state)) await this.engineOf(job).stop(id);
-        this.waiting.delete(id);
-        this.apply(id, { type: 'pause' });
-        return;
-      }
-      case 'resume':
-        this.apply(id, { type: 'resume' });
-        return;
-      case 'retry':
-        this.apply(id, { type: 'retry' });
-        return;
-      case 'cancel':
-        if (job.state === 'done') return;
-        this.waiting.delete(id);
-        await this.engineOf(job).discard(job);
-        this.remove(id);
-        return;
-      case 'remove':
-      case 'removeWithFile':
-        if (!TERMINAL.has(job.state)) return;
-        if (verb === 'removeWithFile' && job.state === 'done' && job.fileName !== null) {
-          try {
-            rmSync(join(job.dir, job.fileName), { force: true });
-          } catch {
-            // In use or already gone; the entry is removed either way.
-          }
+  private async close(): Promise<void> {
+    this.closed = true;
+    const active = this.jobs.filter((j) => ACTIVE.has(j.state));
+    for (const job of active) this.replace({ ...transition(job, { type: 'interrupt' }), interrupted: true });
+    // Saved as cut off before any stop: a crash from here on still finds them marked.
+    this.save();
+    this.notify();
+    await Promise.all(
+      active.map(async (job) => {
+        try {
+          await this.engineOf(job).stop(job.id);
+        } catch {
+          return; // not confirmed: the job stays cut off
         }
-        this.remove(id);
-        return;
-    }
+        const current = this.find(job.id);
+        if (current?.interrupted) this.replace({ ...current, interrupted: false });
+      }),
+    );
+    this.save();
+    this.notify();
   }
 
   private onEngineEvent(ev: EngineEvent): void {
+    if (this.closed) return;
     const job = this.find(ev.jobId);
     if (!job || !ACTIVE.has(job.state)) return; // late event for a job that was paused, cancelled or finished
 
@@ -256,6 +454,13 @@ export class Queue {
         else this.progressTick();
         return;
       }
+      case 'probed':
+        // Only a height the stored list accepts is kept; anything else is ignored, unsaved.
+        if (!isHeight(ev.sourceHeight)) return;
+        this.replace({ ...job, sourceHeight: ev.sourceHeight });
+        this.save();
+        this.notify();
+        return;
       case 'merging':
         if (canApply(job, 'merging')) {
           this.apply(job.id, { type: 'merging' });
@@ -290,9 +495,14 @@ export class Queue {
     if (ev.outcome === 'failed' && ev.retryable && job.attempts < MAX_ATTEMPTS) {
       const attempts = job.attempts + 1;
       this.replace({ ...job, state: 'queued', attempts, reason: `retrying (${attempts}/${MAX_ATTEMPTS})`, speed: 0, eta: null });
-      this.waiting.add(job.id);
+      this.waitToken += 1;
+      const token = this.waitToken;
+      this.waiting.set(job.id, token);
+      // Only the timer of the current wait releases it: an older wait's timer finds another token.
       this.setTimer(() => {
-        if (this.waiting.delete(job.id)) this.commit();
+        if (this.closed || this.waiting.get(job.id) !== token) return;
+        this.waiting.delete(job.id);
+        this.commit();
       }, RETRY_DELAYS_MS[attempts - 1] ?? 60000);
       this.commit();
       return;
@@ -307,41 +517,70 @@ export class Queue {
   private announce(job: Job): void {
     const current = this.find(job.id);
     if (!current) return;
-    let event: Finished;
     if (current.groupId === null) {
-      event = { kind: 'job', title: current.title, failed: current.state === 'failed' ? 1 : 0, skipped: current.state === 'skipped' ? 1 : 0 };
-    } else {
-      const members = this.jobs.filter((j) => j.groupId === current.groupId);
-      if (members.some((j) => !TERMINAL.has(j.state))) return;
-      const group = this.groups.find((g) => g.id === current.groupId);
-      event = {
-        kind: 'group',
-        title: group?.title ?? current.title,
-        failed: members.filter((j) => j.state === 'failed').length,
-        skipped: members.filter((j) => j.state === 'skipped').length,
-      };
+      this.emitFinished({ kind: 'job', title: current.title, failed: current.state === 'failed' ? 1 : 0, skipped: current.state === 'skipped' ? 1 : 0 });
+      return;
     }
+    const members = this.jobs.filter((j) => j.groupId === current.groupId);
+    if (members.some((j) => !TERMINAL.has(j.state))) return;
+    this.emitGroup(current.groupId, members, current.title);
+  }
+
+  /**
+   * After a job-level cancel of an unfinished job: the group is announced once when it still has
+   * members, all of them are finished, and at least one is done or failed (not all skipped).
+   */
+  private announceGroupAfterCancel(groupId: string | null): void {
+    if (groupId === null) return;
+    const members = this.jobs.filter((j) => j.groupId === groupId);
+    if (members.length === 0 || members.some((j) => !TERMINAL.has(j.state))) return;
+    if (!members.some((j) => j.state === 'done' || j.state === 'failed')) return;
+    this.emitGroup(groupId, members, members[0]?.title ?? '');
+  }
+
+  private emitGroup(groupId: string, members: Job[], fallbackTitle: string): void {
+    const group = this.groups.find((g) => g.id === groupId);
+    this.emitFinished({
+      kind: 'group',
+      title: group?.title ?? fallbackTitle,
+      failed: members.filter((j) => j.state === 'failed').length,
+      skipped: members.filter((j) => j.state === 'skipped').length,
+    });
+  }
+
+  private emitFinished(event: Finished): void {
     for (const l of this.finishedListeners) l(event);
   }
 
-  /** Starts queued jobs while slots are free, oldest first. */
-  private schedule(): void {
+  /** Moves queued jobs to probing while slots are free, oldest first. Returns their ids; nothing while closed. */
+  private schedule(): string[] {
+    if (this.closed) return [];
     let active = this.jobs.filter((j) => ACTIVE.has(j.state)).length;
+    const started: string[] = [];
     for (const job of [...this.jobs]) {
       if (active >= this.settings.maxConcurrent) break;
-      if (job.state !== 'queued' || this.waiting.has(job.id)) continue;
-      const started = transition(job, { type: 'start' });
-      this.replace(started);
+      if (job.state !== 'queued' || this.waiting.has(job.id) || this.cancelling.has(job.id)) continue;
+      this.replace(transition(job, { type: 'start' }));
       active += 1;
-      this.engineOf(started).start(started, { settings: this.settings, rateLimitBytes: this.mediaRateLimit() });
+      started.push(job.id);
     }
+    return started;
   }
 
-  /** After a state change: fill free slots, persist, tell the window. */
+  /** After a state change: transition, prune empty groups, save, then start the engines and tell the window. */
   private commit(): void {
-    this.schedule();
+    const started = this.schedule();
     this.groups = this.groups.filter((g) => this.jobs.some((j) => j.groupId === g.id));
     this.save();
+    if (started.length > 0) {
+      const limit = this.share();
+      for (const id of started) {
+        const job = this.find(id);
+        if (!job) continue;
+        this.limits.set(id, limit);
+        this.engineOf(job).start(job, { settings: this.settings, rateLimitBytes: limit });
+      }
+    }
     this.notify();
   }
 
@@ -353,14 +592,38 @@ export class Queue {
     } else if (!this.notifyPending) {
       this.notifyPending = true;
       this.setTimer(() => {
-        if (this.notifyPending) this.notify();
+        if (this.notifyPending && !this.closed) this.notify();
       }, NOTIFY_EVERY_MS);
     }
   }
 
+  /** Writes the list. Never throws: a failure is the save error, retried every SAVE_RETRY_MS until a save works. */
   private save(): void {
     this.lastSave = this.now();
-    this.store.saveSnapshot(this.snapshot());
+    try {
+      this.store.saveSnapshot(this.snapshot());
+    } catch (e) {
+      this.setSaveError(`could not save the download list: ${messageOf(e)}`);
+      this.armSaveRetry();
+      return;
+    }
+    this.setSaveError(null);
+  }
+
+  private armSaveRetry(): void {
+    if (this.saveRetryPending) return;
+    this.saveRetryPending = true;
+    this.setTimer(() => {
+      this.saveRetryPending = false;
+      if (this.closed || this.saveError === null) return;
+      this.save();
+    }, SAVE_RETRY_MS);
+  }
+
+  private setSaveError(error: string | null): void {
+    if (error === this.saveError) return;
+    this.saveError = error;
+    for (const l of this.saveListeners) l(error);
   }
 
   private notify(): void {
@@ -370,14 +633,54 @@ export class Queue {
     for (const l of this.changedListeners) l(snap);
   }
 
-  private mediaRateLimit(): number | null {
+  /** One speed budget: each active job's share in bytes/s, null = no limit. Never 0. */
+  private share(): number | null {
     const { speedLimitKbps, maxConcurrent } = this.settings;
-    return speedLimitKbps === 0 ? null : Math.floor((speedLimitKbps * 1024) / maxConcurrent);
+    if (speedLimitKbps === 0) return null;
+    const active = this.jobs.filter((j) => ACTIVE.has(j.state)).length;
+    return Math.max(1, Math.floor((speedLimitKbps * 1024) / Math.max(maxConcurrent, active)));
   }
 
-  private applyGlobalLimit(): void {
-    // aria2 may not be up yet or may have died; the limit is re-sent on the next settings change.
-    this.file.setGlobalLimit?.(this.settings.speedLimitKbps * 1024).catch(() => undefined);
+  /** After a settings change: a file job whose share changed is re-limited; a video still probing or downloading is restarted. */
+  private retune(): void {
+    if (this.closed) return;
+    const limit = this.share();
+    for (const job of this.jobs) {
+      if (!ACTIVE.has(job.state) || this.limits.get(job.id) === limit) continue;
+      if (job.kind === 'file') {
+        this.limits.set(job.id, limit);
+        try {
+          // aria2 may be down; the next settings change sends the limit again.
+          this.file.setRateLimit(job.id, limit).catch(noop);
+        } catch {
+          // as above
+        }
+      } else if (job.state !== 'merging') {
+        void this.enqueue(job.id, () => this.restartVerb(job.id));
+      }
+    }
+  }
+
+  /** Names held in the folder with this key: every listed job that is not skipped, and every playlist folder in it. */
+  private claimsIn(key: string): string[] {
+    const claims: string[] = [];
+    for (const j of this.jobs) {
+      if (j.state === 'skipped' || dirKey(j.dir) !== key) continue;
+      const held = j.kind === 'media' ? j.baseName : j.fileName;
+      if (held !== null) claims.push(held);
+    }
+    for (const g of this.groups) {
+      if (dirKey(win32.dirname(g.dir)) === key) claims.push(win32.basename(g.dir));
+    }
+    return claims;
+  }
+
+  private diskNames(dir: string): string[] {
+    try {
+      return readdirSync(dir);
+    } catch {
+      return []; // the folder does not exist yet, so nothing in it is taken
+    }
   }
 
   private engineOf(job: Job): Engine {
@@ -394,29 +697,12 @@ export class Queue {
 
   private remove(id: string): void {
     this.jobs = this.jobs.filter((j) => j.id !== id);
+    this.limits.delete(id);
   }
 
   /** Applies a state-machine event when it is legal for the job's current state; otherwise does nothing. */
   private apply(id: string, ev: JobEvent): void {
     const job = this.find(id);
     if (job && canApply(job, ev.type)) this.replace(transition(job, ev));
-  }
-
-  private sameDir(a: string, b: string): boolean {
-    return a.toLowerCase() === b.toLowerCase();
-  }
-
-  private takenBaseNames(dir: string): Set<string> {
-    return new Set(this.jobs.filter((j) => j.baseName !== null && this.sameDir(j.dir, dir)).map((j) => j.baseName as string));
-  }
-
-  private takenFileNames(dir: string): Set<string> {
-    const taken = new Set(this.jobs.filter((j) => j.fileName !== null && this.sameDir(j.dir, dir)).map((j) => j.fileName as string));
-    try {
-      for (const name of readdirSync(dir)) taken.add(name);
-    } catch {
-      // The folder does not exist yet, so nothing in it is taken.
-    }
-    return taken;
   }
 }

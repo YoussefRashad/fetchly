@@ -106,9 +106,3 @@ export function freeName(base: string, ext: string, taken: (name: string) => boo
     if (dot >= 0 && !taken(split)) return split;
   }
 }
-
-/** Kept until the queue moves to `freeName` with the folder's claims and files. */
-export function uniqueName(base: string, ext: string, taken: ReadonlySet<string>): string {
-  const lower = new Set([...taken].map((n) => n.toLowerCase()));
-  return freeName(base, ext, (name) => lower.has(name.toLowerCase()));
-}

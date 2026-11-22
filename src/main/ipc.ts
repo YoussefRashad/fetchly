@@ -22,8 +22,8 @@ import { MAX_HEIGHTS } from './ytdlp/parse';
 /** The part of the queue the window can reach. */
 export interface QueueLike {
   add(req: AddRequest): void;
-  job(id: string, verb: JobVerb): Promise<void>;
-  group(id: string, verb: GroupVerb): Promise<void>;
+  job(id: string, verb: JobVerb): Promise<unknown>;
+  group(id: string, verb: GroupVerb): Promise<unknown>;
   snapshot(): Snapshot;
   setSettings(s: Settings): void;
 }
