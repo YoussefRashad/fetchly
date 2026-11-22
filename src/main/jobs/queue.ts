@@ -28,7 +28,7 @@ export interface Finished {
 export interface QueueDeps {
   store: Store;
   media: Engine;
-  file: Engine & { setGlobalLimit(bytesPerSec: number): Promise<void> };
+  file: Engine & { setGlobalLimit?(bytesPerSec: number): Promise<void> };
   initial: Snapshot;
   settings: Settings;
   now?: () => number;
@@ -377,7 +377,7 @@ export class Queue {
 
   private applyGlobalLimit(): void {
     // aria2 may not be up yet or may have died; the limit is re-sent on the next settings change.
-    this.file.setGlobalLimit(this.settings.speedLimitKbps * 1024).catch(() => undefined);
+    this.file.setGlobalLimit?.(this.settings.speedLimitKbps * 1024).catch(() => undefined);
   }
 
   private engineOf(job: Job): Engine {
