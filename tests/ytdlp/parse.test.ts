@@ -19,19 +19,32 @@ describe('parseProbe', () => {
       kind: 'playlist',
       title: 'React Course',
       entries: [
-        { index: 1, url: 'https://example.com/v/1', title: 'Intro', unavailable: false },
-        { index: 2, url: 'https://example.com/v/2', title: 'Setup', unavailable: false },
-        { index: 4, url: 'https://example.com/v/3', title: '[Private video]', unavailable: true },
-        { index: 5, url: 'https://example.com/v/4', title: '[Deleted video]', unavailable: true },
-        { index: 6, url: '', title: 'No link', unavailable: true },
+        { index: 1, url: 'https://example.com/v/1', title: 'Intro', unavailable: false, reason: null },
+        { index: 2, url: 'https://example.com/v/2', title: 'Setup', unavailable: false, reason: null },
+        { index: 3, url: '', title: 'Item 3', unavailable: true, reason: 'unavailable' },
+        { index: 4, url: 'https://example.com/v/3', title: '[Private video]', unavailable: true, reason: 'private' },
+        { index: 5, url: 'https://example.com/v/4', title: '[Deleted video]', unavailable: true, reason: 'removed' },
+        { index: 6, url: '', title: 'No link', unavailable: true, reason: 'unavailable' },
       ],
     });
   });
 
-  it('keeps playlist positions when an entry is missing', () => {
+  it('keeps a placeholder for a missing entry at its position', () => {
     const json = JSON.stringify({ _type: 'playlist', title: 'P', entries: [null, { url: 'https://e.com/2', title: 'Two' }] });
     const probe = parseProbe(json);
-    expect(probe.kind === 'playlist' && probe.entries[0]?.index).toBe(2);
+    expect(probe.kind === 'playlist' && probe.entries).toEqual([
+      { index: 1, url: '', title: 'Item 1', unavailable: true, reason: 'unavailable' },
+      { index: 2, url: 'https://e.com/2', title: 'Two', unavailable: false, reason: null },
+    ]);
+  });
+
+  it('keeps a placeholder for an entry that is not an object', () => {
+    const json = JSON.stringify({ _type: 'playlist', title: 'P', entries: ['x', 7] });
+    const probe = parseProbe(json);
+    expect(probe.kind === 'playlist' && probe.entries).toEqual([
+      { index: 1, url: '', title: 'Item 1', unavailable: true, reason: 'unavailable' },
+      { index: 2, url: '', title: 'Item 2', unavailable: true, reason: 'unavailable' },
+    ]);
   });
 
   it('reads a single video with its distinct heights, highest first', () => {
@@ -127,8 +140,13 @@ describe('parseLine', () => {
 describe('classifyError', () => {
   it.each([
     ['ERROR: [x] 1: This video is DRM protected', 'skipped', 'protected'],
-    ['ERROR: [youtube] abc: Private video. Sign in if you have been granted access', 'skipped', 'private'],
+    ['ERROR: [youtube] abc: Private video. Sign in if you have been granted access', 'failed', 'login required'],
+    ['ERROR: [youtube] x: Private video', 'skipped', 'private'],
     ['ERROR: [youtube] abc: Video unavailable', 'skipped', 'removed'],
+    ['ERROR: [youtube] abc: Video unavailable. This video is not available in your country', 'skipped', 'unavailable in region'],
+    ['ERROR: [youtube] abc: Video unavailable. Sign in, it is not available in your country', 'failed', 'login required'],
+    ['ERROR: [youtube] abc: This video is age-restricted', 'failed', 'login required'],
+    ['ERROR: [youtube] abc: This video is age restricted and only available on YouTube', 'failed', 'login required'],
     ['ERROR: This video has been removed by the uploader', 'skipped', 'removed'],
     ['ERROR: The account associated with this video has been terminated', 'skipped', 'removed'],
     ['ERROR: [x] 9: This page does not exist', 'skipped', 'removed'],

@@ -86,6 +86,7 @@ const entries = (n: number, unavailable: number[] = []): PlaylistEntry[] =>
     url: `https://example.com/v/${i + 1}`,
     title: `Part ${i + 1}`,
     unavailable: unavailable.includes(i + 1),
+    reason: unavailable.includes(i + 1) ? ('unavailable' as const) : null,
   }));
 
 const playlist = (n: number, opts: { unavailable?: number[]; selected?: number[] | null; title?: string } = {}): AddRequest => ({

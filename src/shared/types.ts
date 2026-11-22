@@ -77,11 +77,18 @@ export interface Settings {
   subtitleLangs: string[];
 }
 
+/** Why a playlist entry cannot be downloaded; becomes the skipped job's reason. */
+export type EntryReason = 'private' | 'removed' | 'unavailable';
+
 export interface PlaylistEntry {
+  /** 1-based position in the playlist */
   index: number;
+  /** '' for a placeholder without a link */
   url: string;
   title: string;
   unavailable: boolean;
+  /** non-null exactly when unavailable is true */
+  reason: EntryReason | null;
 }
 
 export type ProbeResult =

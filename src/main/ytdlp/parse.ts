@@ -1,9 +1,12 @@
-import type { PlaylistEntry, ProbeResult } from '../../shared/types';
+import type { EntryReason, PlaylistEntry, ProbeResult } from '../../shared/types';
 import { FILE_PREFIX, PROGRESS_PREFIX } from './args';
 
 export type MediaProbe = Extract<ProbeResult, { kind: 'media' | 'playlist' }>;
 
-const UNAVAILABLE_TITLES = new Set(['[Private video]', '[Deleted video]']);
+const UNAVAILABLE_TITLES = new Map<string, EntryReason>([
+  ['[Private video]', 'private'],
+  ['[Deleted video]', 'removed'],
+]);
 
 function str(v: unknown): string | null {
   return typeof v === 'string' && v !== '' ? v : null;
@@ -18,14 +21,14 @@ export function parseProbe(json: string): MediaProbe {
 
   if (info['_type'] === 'playlist') {
     const rawEntries = Array.isArray(info['entries']) ? (info['entries'] as unknown[]) : [];
-    const entries: PlaylistEntry[] = [];
-    rawEntries.forEach((e, i) => {
-      if (typeof e !== 'object' || e === null) return;
-      const entry = e as Record<string, unknown>;
-      const index = i + 1; // the position in the playlist, kept even when a neighbour is missing
+    // Every position yields an entry, so a missing one stays visible as a skipped placeholder.
+    const entries: PlaylistEntry[] = rawEntries.map((e, i) => {
+      const index = i + 1;
+      const entry = typeof e === 'object' && e !== null && !Array.isArray(e) ? (e as Record<string, unknown>) : {};
       const url = str(entry['url']) ?? str(entry['webpage_url']) ?? '';
       const entryTitle = str(entry['title']) ?? `Item ${index}`;
-      entries.push({ index, url, title: entryTitle, unavailable: url === '' || UNAVAILABLE_TITLES.has(entryTitle) });
+      const reason = UNAVAILABLE_TITLES.get(entryTitle) ?? (url === '' ? 'unavailable' : null);
+      return { index, url, title: entryTitle, unavailable: reason !== null, reason };
     });
     return { kind: 'playlist', title, entries };
   }
@@ -86,13 +89,17 @@ export interface Classified {
   retryable: boolean;
 }
 
-/** First match wins, so the order is part of the rule. */
+/**
+ * First match wins, so the order is part of the rule. Any sign-in hint wins over
+ * private, region and removed: a login may fix it, so it stays a retryable failure
+ * once logins exist. Region is checked before the generic "video unavailable".
+ */
 const RULES: [RegExp, 'failed' | 'skipped', string][] = [
   [/\bDRM\b/i, 'skipped', 'protected'],
+  [/sign in|log in|login required|cookies|members-only|confirm your age|age[- ]restricted/i, 'failed', 'login required'],
+  [/not (made this video )?available in your country|geo.?restrict/i, 'skipped', 'unavailable in region'],
   [/private video/i, 'skipped', 'private'],
   [/video unavailable|has been removed|account .*terminated|does not exist/i, 'skipped', 'removed'],
-  [/not (made this video )?available in your country|geo.?restrict/i, 'skipped', 'unavailable in region'],
-  [/sign in|log in|login required|cookies|members-only/i, 'failed', 'login required'],
   [/no space left|ENOSPC|not enough space/i, 'failed', 'disk full'],
   [/permission denied|EACCES|EPERM|unable to open for writing/i, 'failed', 'cannot write to folder'],
   [/unsupported url/i, 'failed', 'unsupported site'],

@@ -69,6 +69,7 @@ export class MediaEngine implements Engine {
         baseName: job.baseName,
         ffmpegPath: this.ffmpegPath,
         rateLimitBytes: ctx.rateLimitBytes,
+        sourceHeight: job.sourceHeight,
       }),
     ];
     const child = spawn(this.ytdlp.command, args, {

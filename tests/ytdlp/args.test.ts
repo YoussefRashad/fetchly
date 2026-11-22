@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { downloadArgs, FILE_PREFIX, probeArgs, PROGRESS_PREFIX } from '../../src/main/ytdlp/args';
+import { downloadArgs, FILE_PREFIX, heightProbeArgs, probeArgs, PROGRESS_PREFIX } from '../../src/main/ytdlp/args';
 import type { Quality } from '../../src/shared/types';
 
 const URL = 'https://example.com/watch?v=1';
@@ -14,6 +14,7 @@ function build(quality: Quality, over: Partial<Parameters<typeof downloadArgs>[0
     baseName: '03 - Intro',
     ffmpegPath: 'C:\\bin\\ffmpeg.exe',
     rateLimitBytes: null,
+    sourceHeight: null,
     ...over,
   });
 }
@@ -31,11 +32,18 @@ describe('probeArgs', () => {
   });
 });
 
+describe('heightProbeArgs', () => {
+  it('asks for the full JSON of one video, url after --', () => {
+    expect(heightProbeArgs(URL)).toEqual(['-J', '--no-playlist', '--no-warnings', '--', URL]);
+  });
+});
+
 describe('downloadArgs format', () => {
   it('prefers H.264 in mp4 up to 1080p', () => {
     const args = build({ kind: 'max', height: 1080 });
     expect(valueOf(args, '-f')).toBe(AVC_1080);
     expect(valueOf(args, '--merge-output-format')).toBe('mp4');
+    expect(args).not.toContain('--remux-video');
   });
 
   it('uses the chosen ceiling below 1080p', () => {
@@ -54,10 +62,24 @@ describe('downloadArgs format', () => {
     const args = build({ kind: 'max', height: 2160 }, { preferMp4Max1080: true });
     expect(valueOf(args, '-f')).toBe(AVC_1080);
     expect(valueOf(args, '--merge-output-format')).toBe('mp4');
+    expect(valueOf(args, '--remux-video')).toBe('mp4');
   });
 
-  it('takes the best streams into mkv for Best', () => {
+  it('Best with an unknown height keeps the mkv path', () => {
     const args = build({ kind: 'best' });
+    expect(valueOf(args, '-f')).toBe('bv*+ba/b');
+    expect(valueOf(args, '--merge-output-format')).toBe('mkv');
+    expect(args).not.toContain('--remux-video');
+  });
+
+  it.each([1080, 720])('Best takes the H.264 mp4 path when the source is %ip', (sourceHeight) => {
+    const args = build({ kind: 'best' }, { sourceHeight });
+    expect(valueOf(args, '-f')).toBe(AVC_1080);
+    expect(valueOf(args, '--merge-output-format')).toBe('mp4');
+  });
+
+  it('Best keeps the codec in mkv above 1080p', () => {
+    const args = build({ kind: 'best' }, { sourceHeight: 2160 });
     expect(valueOf(args, '-f')).toBe('bv*+ba/b');
     expect(valueOf(args, '--merge-output-format')).toBe('mkv');
   });
@@ -66,6 +88,7 @@ describe('downloadArgs format', () => {
     const args = build({ kind: 'best' }, { preferMp4Max1080: true });
     expect(valueOf(args, '-f')).toBe(AVC_1080);
     expect(valueOf(args, '--merge-output-format')).toBe('mp4');
+    expect(valueOf(args, '--remux-video')).toBe('mp4');
   });
 
   it.each(['m4a', 'mp3'] as const)('extracts audio as %s without a merge format', (format) => {
@@ -74,6 +97,11 @@ describe('downloadArgs format', () => {
     expect(args).toContain('-x');
     expect(valueOf(args, '--audio-format')).toBe(format);
     expect(args).not.toContain('--merge-output-format');
+    expect(args).not.toContain('--remux-video');
+  });
+
+  it('never remuxes audio, even when mp4 is preferred', () => {
+    expect(build({ kind: 'audio', format: 'mp3' }, { preferMp4Max1080: true })).not.toContain('--remux-video');
   });
 });
 

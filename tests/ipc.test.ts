@@ -26,8 +26,8 @@ const list: ProbeResult = {
   kind: 'playlist',
   title: 'Course',
   entries: [
-    { index: 1, url: 'https://example.com/v/1', title: 'One', unavailable: false },
-    { index: 2, url: 'https://example.com/v/2', title: 'Two', unavailable: false },
+    { index: 1, url: 'https://example.com/v/1', title: 'One', unavailable: false, reason: null },
+    { index: 2, url: 'https://example.com/v/2', title: 'Two', unavailable: false, reason: null },
   ],
 };
 
@@ -170,7 +170,7 @@ describe('add', () => {
     ['a non-http link', { url: 'file:///C:/x' }],
     ['a media request without a usable quality', { quality: { kind: 'max', height: 999 } as never }],
     ['a subtitle language that is not a language code', { subtitleLangs: ['en', '--exec calc'] }],
-    ['a playlist entry with a non-http link', { probe: { ...list, entries: [{ index: 1, url: 'file:///x', title: 'x', unavailable: false }] } }],
+    ['a playlist entry with a non-http link', { probe: { ...list, entries: [{ index: 1, url: 'file:///x', title: 'x', unavailable: false, reason: null }] } }],
     ['a file name that carries a path', { probe: { kind: 'file', fileName: '..\\evil.exe', size: 1, resumable: true } as ProbeResult, quality: null }],
   ])('refuses %s', async (_name, over) => {
     expect(await createHandlers(deps()).add(request(over))).toMatchObject({ ok: false });
