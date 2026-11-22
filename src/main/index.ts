@@ -9,6 +9,7 @@ import { Queue } from './jobs/queue';
 import { Store } from './jobs/store';
 import { probeUrl, validateUrl } from './probe';
 import { attachQueue, createTray } from './shell';
+import { killStrays } from './strays';
 
 let win: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -75,6 +76,8 @@ async function main(): Promise<void> {
   /** Starts aria2 and both engines. Safe to call once the three tools are installed. */
   const startEngines = async (): Promise<void> => {
     if (queue) return;
+    // A previous run that was killed may have left its tools writing to the partial files.
+    await killStrays(join(userData, 'bin'));
     const aria2 = await startAria2(binaries.path('aria2c'), join(userData, 'aria2'));
     stopAria2 = aria2.stop;
     const media = new MediaEngine({ command: binaries.path('yt-dlp'), prefixArgs: [] }, binaries.path('ffmpeg'));
