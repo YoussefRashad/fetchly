@@ -147,6 +147,14 @@ describe('probeUrl', () => {
     expect(result).toMatchObject({ fileName: 'My File.zip' });
   });
 
+  it('says yt-dlp stopped, not that a download failed, when it ends without an error of its own', async () => {
+    expect(await reasonOf(probe('probe-killed'))).toBe('yt-dlp stopped before it could read the link. Try again.');
+  });
+
+  it('still reports the error yt-dlp gave when it gave one', async () => {
+    expect(await reasonOf(probe('probe-private'))).not.toBe('yt-dlp stopped before it could read the link. Try again.');
+  });
+
   it('reports unreadable yt-dlp output', async () => {
     expect(await reasonOf(probe('probe-garbage'))).toBe('could not read the video information');
   });

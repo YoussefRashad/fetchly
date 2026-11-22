@@ -13,6 +13,8 @@ export class InvalidUrl extends Error {
 }
 
 /** Why a link cannot be added; `reason` is shown to the user as is. */
+const STOPPED_EARLY = 'yt-dlp stopped before it could read the link. Try again.';
+
 export class ProbeError extends Error {
   constructor(readonly reason: string) {
     super(reason);
@@ -134,6 +136,9 @@ export async function probeUrl(url: string, ytdlp: Exe, fetchImpl: typeof fetch 
   if (ran.timedOut) throw new ProbeError('timed out reading the link');
 
   if (ran.code !== 0) {
+    // Ended without an error of its own: stopped from outside (a leftover-process cleanup, the
+    // user in Task Manager) or crashed. Nothing about the link is known, so say that, not "download failed".
+    if (!/^ERROR:/mu.test(ran.stderr)) throw new ProbeError(STOPPED_EARLY);
     const { reason } = classifyError(ran.stderr);
     if (reason === 'unsupported site') return probeFile(url, fetchImpl);
     throw new ProbeError(reason);
