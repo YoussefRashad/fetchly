@@ -5,8 +5,9 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { Engine, EngineEvent, EngineListener, StartContext } from '../../src/main/engines/engine';
 import { Queue, RETRY_DELAYS_MS } from '../../src/main/jobs/queue';
 import type { Store } from '../../src/main/jobs/store';
+import { parseSnapshotFile } from '../../src/main/jobs/validate';
 import type { AddRequest, Job, PlaylistEntry, Settings, Snapshot } from '../../src/shared/types';
-import { makeSettings } from '../helpers';
+import { makeJob, makeSettings } from '../helpers';
 
 class FakeEngine implements Engine {
   started: { job: Job; ctx: StartContext }[] = [];
@@ -437,6 +438,312 @@ describe('failures', () => {
   });
 });
 
+describe('a finished download that names no file (A9)', () => {
+  const REASON = 'finished without a file';
+
+  it.each([
+    ['media', 'probing'],
+    ['media', 'downloading'],
+    ['media', 'merging'],
+    ['file', 'probing'],
+    ['file', 'downloading'],
+  ] as const)('fails a %s job that was %s at once, with no retry and no empty name saved', (kind, state) => {
+    const q = build();
+    q.add(kind === 'media' ? video() : fileReq());
+    const engine = kind === 'media' ? media : file;
+    const id = jobAt(q, 0).id;
+    if (state === 'downloading') engine.emit(progress(id));
+    if (state === 'merging') {
+      media.emit(progress(id));
+      media.emit({ jobId: id, type: 'merging' });
+    }
+    expect(jobAt(q, 0).state).toBe(state);
+    const nameBefore = jobAt(q, 0).fileName;
+
+    engine.emit({ jobId: id, type: 'done', fileName: '', actualHeight: null });
+
+    expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: REASON, fileName: nameBefore, speed: 0, eta: null });
+    expect(timers.filter((t) => t.ms >= 5000)).toEqual([]);
+    fire(5000);
+    fire(20000);
+    fire(60000);
+    expect(jobAt(q, 0).state).toBe('failed');
+    expect(engine.started).toHaveLength(1);
+    expect(finished).toEqual([{ kind: 'job', title: jobAt(q, 0).title, failed: 1, skipped: 0 }]);
+    expect(saves.flatMap((s) => s.jobs).filter((j) => j.fileName === '')).toEqual([]);
+    expect(saves.at(-1)?.jobs[0]).toMatchObject({ state: 'failed', reason: REASON });
+    expect(parseSnapshotFile(JSON.parse(JSON.stringify(saves.at(-1))))).not.toBeNull();
+  });
+
+  it('does not depend on the height the engine reports', () => {
+    const q = build();
+    q.add(video());
+    const id = jobAt(q, 0).id;
+    media.emit({ jobId: id, type: 'done', fileName: '', actualHeight: 720 });
+    expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: REASON });
+    expect(parseSnapshotFile(JSON.parse(JSON.stringify(saves.at(-1))))).not.toBeNull();
+  });
+
+  it.each([0, 1, 2])('is not retried even when the job has %d retries behind it and some left', (retries) => {
+    const q = build();
+    q.add(video());
+    const id = jobAt(q, 0).id;
+    for (const delay of RETRY_DELAYS_MS.slice(0, retries)) {
+      media.emit(error(id, 'HTTP Error 503', true));
+      fire(delay);
+    }
+    expect(jobAt(q, 0)).toMatchObject({ state: 'probing', attempts: retries });
+    media.emit({ jobId: id, type: 'done', fileName: '', actualHeight: null });
+    expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: REASON });
+    expect(timers.filter((t) => t.ms >= 5000)).toEqual([]);
+    expect(media.started).toHaveLength(retries + 1);
+    expect(parseSnapshotFile(JSON.parse(JSON.stringify(saves.at(-1))))).not.toBeNull();
+  });
+
+  it('counts as a failure in the summary of its group', () => {
+    const q = build();
+    q.add(playlist(2));
+    const [first, second] = [jobAt(q, 0).id, jobAt(q, 1).id];
+    media.emit({ jobId: first, type: 'done', fileName: '', actualHeight: 720 });
+    expect(finished).toEqual([]); // the other item is still running
+    media.emit(done(second));
+    expect(finished).toEqual([{ kind: 'group', title: 'React: Course?', failed: 1, skipped: 0 }]);
+    expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: REASON });
+    expect(jobAt(q, 1).state).toBe('done');
+    expect(parseSnapshotFile(JSON.parse(JSON.stringify(saves.at(-1))))).not.toBeNull();
+  });
+
+  it('can be retried by hand like any other failure', async () => {
+    const q = build();
+    q.add(video());
+    const id = jobAt(q, 0).id;
+    media.emit({ jobId: id, type: 'done', fileName: '', actualHeight: null });
+    await q.job(id, 'retry');
+    expect(jobAt(q, 0)).toMatchObject({ state: 'probing', reason: null, attempts: 0 });
+    expect(media.started).toHaveLength(2);
+  });
+
+  it('leaves a normal finish alone', () => {
+    const q = build();
+    q.add(video());
+    media.emit(done(jobAt(q, 0).id, 'Talk.mp4'));
+    expect(jobAt(q, 0)).toMatchObject({ state: 'done', fileName: 'Talk.mp4', reason: null });
+  });
+});
+
+describe('the name a done event may save (B1)', () => {
+  const REASON = 'finished without a file';
+
+  /** A done event as a tool may send it: the name is whatever it printed, and not always a string. */
+  const doneNamed = (jobId: string, fileName: unknown): EngineEvent => ({ jobId, type: 'done', fileName, actualHeight: 720 }) as unknown as EngineEvent;
+
+  /** The stored list must load again whatever the last save holds. */
+  const lastSaveLoads = (): void => {
+    expect(parseSnapshotFile(JSON.parse(JSON.stringify(saves.at(-1))))).not.toBeNull();
+  };
+
+  const UNUSABLE: [string, unknown][] = [
+    ['two dots', '..'],
+    ['one dot', '.'],
+    ['three dots', '...'],
+    ['four dots', '....'],
+    ['dots and spaces', '. . .'],
+    ['spaces only', '   '],
+    ['one space', ' '],
+    ['a non-breaking space', ' '],
+    ['an ideographic space', '　'],
+    ['a colon', 'a:b'],
+    ['an alternate data stream', 'report.txt:payload'],
+    ['a backslash', 'a\\b'],
+    ['a path up', '..\\evil.exe'],
+    ['a slash', 'a/b'],
+    ['a leading slash', '/a.mp4'],
+    ['a null character', 'a\u0000b'],
+    ['a tab', 'a\tb'],
+    ['a newline', 'a\nb'],
+    ['a unit separator', 'a\u001fb'],
+    ['a delete character', 'a\u007fb'],
+    ['an empty name', ''],
+    ['undefined', undefined],
+    ['null', null],
+    ['a number', 5],
+    ['true', true],
+    ['a list', ['Talk.mp4']],
+    ['an object', { name: 'Talk.mp4' }],
+  ];
+  const KINDS = ['media', 'file'] as const;
+
+  it.each(KINDS.flatMap((kind) => UNUSABLE.map(([label, value]) => [kind, label, value] as const)))(
+    'fails a %s job that finishes with %s as its name: no retry, no timer, name kept',
+    (kind, _label, value) => {
+      const q = build();
+      q.add(kind === 'media' ? video() : fileReq());
+      const engine = kind === 'media' ? media : file;
+      const id = jobAt(q, 0).id;
+      engine.emit(progress(id));
+      expect(jobAt(q, 0).state).toBe('downloading');
+      const nameBefore = jobAt(q, 0).fileName;
+
+      engine.emit(doneNamed(id, value));
+
+      expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: REASON, fileName: nameBefore, speed: 0, eta: null });
+      expect(timers).toEqual([]);
+      fire(5000);
+      fire(20000);
+      fire(60000);
+      expect(jobAt(q, 0).state).toBe('failed');
+      expect(engine.started).toHaveLength(1);
+      expect(finished).toEqual([{ kind: 'job', title: jobAt(q, 0).title, failed: 1, skipped: 0 }]);
+      if (typeof value === 'string') expect(saves.flatMap((s) => s.jobs).filter((j) => j.fileName === value)).toEqual([]);
+      expect(saves.at(-1)?.jobs[0]).toMatchObject({ state: 'failed', reason: REASON, fileName: nameBefore });
+      lastSaveLoads();
+    },
+  );
+
+  it.each([
+    ['media', 'probing', '..'],
+    ['media', 'merging', '..'],
+    ['media', 'probing', '...'],
+    ['media', 'merging', 'a:b'],
+    ['file', 'probing', '...'],
+    ['file', 'downloading', 'a:b'],
+  ] as const)('fails a %s job that was %s when it finished with the name %j', (kind, state, name) => {
+    const q = build();
+    q.add(kind === 'media' ? video() : fileReq());
+    const engine = kind === 'media' ? media : file;
+    const id = jobAt(q, 0).id;
+    if (state !== 'probing') engine.emit(progress(id));
+    if (state === 'merging') media.emit({ jobId: id, type: 'merging' });
+    expect(jobAt(q, 0).state).toBe(state);
+    const nameBefore = jobAt(q, 0).fileName;
+    engine.emit(doneNamed(id, name));
+    expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: REASON, fileName: nameBefore });
+    expect(timers).toEqual([]);
+    lastSaveLoads();
+  });
+
+  it.each([0, 1, 2])('is not retried even when the job has %d retries behind it and some left', (retries) => {
+    const q = build();
+    q.add(video());
+    const id = jobAt(q, 0).id;
+    for (const delay of RETRY_DELAYS_MS.slice(0, retries)) {
+      media.emit(error(id, 'HTTP Error 503', true));
+      fire(delay);
+    }
+    expect(jobAt(q, 0)).toMatchObject({ state: 'probing', attempts: retries });
+    media.emit(doneNamed(id, '...'));
+    expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: REASON });
+    expect(timers).toEqual([]);
+    expect(media.started).toHaveLength(retries + 1);
+    lastSaveLoads();
+  });
+
+  it.each([
+    ['two dots', '..'],
+    ['a colon', 'a:b'],
+    ['an empty name', ''],
+    ['spaces only', '   '],
+    ['not a string', undefined],
+  ])('keeps the file name a media job already had when it finishes with %s', (_label, value) => {
+    const old = makeJob({ id: 'old', state: 'queued', fileName: 'Old.mp4', dir, baseName: 'Old' });
+    const q = build({}, { jobs: [old], groups: [] });
+    expect(jobAt(q, 0).state).toBe('probing');
+    media.emit(doneNamed('old', value));
+    expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: REASON, fileName: 'Old.mp4' });
+    expect(timers).toEqual([]);
+    expect(saves.at(-1)?.jobs[0]).toMatchObject({ state: 'failed', fileName: 'Old.mp4' });
+    lastSaveLoads();
+  });
+
+  it('fails an old file job named "..." when the file engine echoes the name back', () => {
+    const old = makeJob({ id: 'old-file', kind: 'file', state: 'queued', quality: null, baseName: null, fileName: '...', dir, title: 'old', bytesTotal: 5000 });
+    // Ruling 4a: the old list loads as it is; only the new done event is refused.
+    expect(parseSnapshotFile(JSON.parse(JSON.stringify({ version: 1, jobs: [old], groups: [] })))).not.toBeNull();
+    const q = build({}, { jobs: [old], groups: [] });
+    expect(jobAt(q, 0).state).toBe('probing');
+    file.emit({ jobId: 'old-file', type: 'done', fileName: '...', actualHeight: null });
+    expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: REASON, fileName: '...' });
+    expect(timers).toEqual([]);
+    expect(finished).toEqual([{ kind: 'job', title: 'old', failed: 1, skipped: 0 }]);
+    lastSaveLoads();
+  });
+
+  it('counts a refused name as a failure in the summary of its group', () => {
+    const q = build();
+    q.add(playlist(2));
+    const [first, second] = [jobAt(q, 0).id, jobAt(q, 1).id];
+    media.emit(doneNamed(first, 'a:b'));
+    expect(finished).toEqual([]); // the other item is still running
+    media.emit(done(second, 'Part 2.mp4'));
+    expect(finished).toEqual([{ kind: 'group', title: 'React: Course?', failed: 1, skipped: 0 }]);
+    expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: REASON, fileName: null });
+    expect(jobAt(q, 1)).toMatchObject({ state: 'done', fileName: 'Part 2.mp4' });
+    expect(timers).toEqual([]);
+    lastSaveLoads();
+  });
+
+  it('can be retried by hand like any other failure', async () => {
+    const q = build();
+    q.add(video());
+    const id = jobAt(q, 0).id;
+    media.emit(doneNamed(id, '..'));
+    await q.job(id, 'retry');
+    expect(jobAt(q, 0)).toMatchObject({ state: 'probing', reason: null, attempts: 0 });
+    expect(media.started).toHaveLength(2);
+  });
+
+  const USABLE = [
+    'Talk.mp4 ',
+    'Talk.mp4',
+    'a.',
+    '.a',
+    ' a',
+    'a..b',
+    '...a',
+    'a...',
+    'My talk (final) 2.mp4',
+    'ملف.mp4',
+    'a'.repeat(300),
+  ];
+
+  it.each(KINDS.flatMap((kind) => USABLE.map((name) => [kind, name] as const)))('still completes a %s job named %j, exactly as given', (kind, name) => {
+    const q = build();
+    q.add(kind === 'media' ? video() : fileReq());
+    const engine = kind === 'media' ? media : file;
+    const id = jobAt(q, 0).id;
+    engine.emit(progress(id));
+    engine.emit({ jobId: id, type: 'done', fileName: name, actualHeight: null });
+    expect(jobAt(q, 0)).toMatchObject({ state: 'done', fileName: name, reason: null });
+    expect(finished).toEqual([{ kind: 'job', title: jobAt(q, 0).title, failed: 0, skipped: 0 }]);
+    expect(saves.at(-1)?.jobs[0]).toMatchObject({ state: 'done', fileName: name });
+    expect(parseSnapshotFile(JSON.parse(JSON.stringify(saves.at(-1))))?.jobs[0]?.fileName).toBe(name);
+  });
+});
+
+describe('Queue.add keeps no array rule of its own (B2, spec 7.8)', () => {
+  const heightsThenHole = new Array<number>(2);
+  heightsThenHole[0] = 1080;
+  const ROWS: [string, unknown[]][] = [
+    ['NaN', [Number.NaN]],
+    ['a negative height', [-720]],
+    ['zero', [0]],
+    ['Infinity', [Number.POSITIVE_INFINITY]],
+    ['text', ['1080']],
+    ['a null entry', [1080, null]],
+    ['a hole', new Array<number>(1)],
+    ['a valid height and then a hole', heightsThenHole],
+    ['101 heights', Array.from({ length: 101 }, (_, i) => i + 1)],
+  ];
+
+  it.each(ROWS)('still adds a video whose probe lists heights with %s: the checks are the handler\'s', (_label, heights) => {
+    const q = build();
+    const req = { ...video(), probe: { kind: 'media', title: 'Talk', thumbnail: null, heights } } as unknown as AddRequest;
+    expect(() => q.add(req)).not.toThrow();
+    expect(q.snapshot().jobs).toHaveLength(1);
+    expect(jobAt(q, 0)).toMatchObject({ kind: 'media', state: 'probing', title: 'Talk' });
+  });
+});
+
 describe('cancel and remove', () => {
   it('cancel discards the partial data and removes the job', async () => {
     const q = build();
@@ -572,6 +879,101 @@ describe('groups', () => {
 });
 
 describe('persistence and notifications', () => {
+  /** A job as the last save holds it: these are the numbers that would be written to disk. */
+  const savedJob = (id: string): Job => {
+    const job = saves.at(-1)?.jobs.find((j) => j.id === id);
+    if (!job) throw new Error(`no saved job ${id}`);
+    return job;
+  };
+  const meters = (j: Job) => ({ bytesDone: j.bytesDone, bytesTotal: j.bytesTotal, speed: j.speed, eta: j.eta, actualHeight: j.actualHeight });
+  /** No saved meter is negative or NaN. */
+  const expectSound = (j: Job): void => {
+    for (const [name, value] of Object.entries(meters(j))) {
+      if (value === null) continue;
+      expect(Number.isFinite(value), `${name} is finite`).toBe(true);
+      expect(value, `${name} is not negative`).toBeGreaterThanOrEqual(0);
+    }
+  };
+
+  it('never saves a number the stored list would reject', () => {
+    const q = build();
+    q.add(video());
+    q.add(fileReq());
+    const [v, f] = [jobAt(q, 0).id, jobAt(q, 1).id];
+    media.emit({ jobId: v, type: 'progress', bytesDone: Number.NaN, bytesTotal: -5, speed: Number.NaN, eta: Number.POSITIVE_INFINITY });
+    file.emit({ jobId: f, type: 'progress', bytesDone: -1, bytesTotal: Number.NaN, speed: -3, eta: -2 });
+
+    // After a bad number: bytesDone and bytesTotal keep their previous value, speed is 0, eta and actualHeight are null.
+    expect(meters(savedJob(v))).toEqual({ bytesDone: 0, bytesTotal: null, speed: 0, eta: null, actualHeight: null });
+    expect(meters(savedJob(f))).toEqual({ bytesDone: 0, bytesTotal: 5000, speed: 0, eta: null, actualHeight: null }); // 5000 is the size the probe gave
+    expectSound(savedJob(v));
+    expectSound(savedJob(f));
+    expect(parseSnapshotFile(JSON.parse(JSON.stringify(saves.at(-1))))).not.toBeNull();
+
+    media.emit({ jobId: v, type: 'done', fileName: 'Talk.mp4', actualHeight: Number.POSITIVE_INFINITY });
+    file.emit({ jobId: f, type: 'done', fileName: 'a.zip', actualHeight: 0 });
+
+    // A finished job takes bytesDone from bytesTotal, so a bad total would have leaked into it here.
+    expect(meters(savedJob(v))).toEqual({ bytesDone: 0, bytesTotal: null, speed: 0, eta: null, actualHeight: null });
+    expect(meters(savedJob(f))).toEqual({ bytesDone: 5000, bytesTotal: 5000, speed: 0, eta: null, actualHeight: null });
+    expectSound(savedJob(v));
+    expectSound(savedJob(f));
+    expect(saves.at(-1)?.jobs.map((j) => j.state)).toEqual(['done', 'done']);
+    expect(parseSnapshotFile(JSON.parse(JSON.stringify(saves.at(-1))))).not.toBeNull();
+  });
+
+  describe('one bad meter at a time (N1)', () => {
+    const GOOD = { bytesDone: 10, bytesTotal: 100, speed: 5, eta: 18 };
+    const NEXT = { bytesDone: 20, bytesTotal: 200, speed: 7, eta: 9 };
+    const FIELDS = ['bytesDone', 'bytesTotal', 'speed', 'eta'] as const;
+    /** What a meter becomes when its new number is bad: the old count stays, speed falls to 0, eta to null. */
+    const KEPT: Record<(typeof FIELDS)[number], number | null> = { bytesDone: GOOD.bytesDone, bytesTotal: GOOD.bytesTotal, speed: 0, eta: null };
+    const BAD_NUMBERS = [Number.NaN, -1, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY];
+    const KINDS = ['media', 'file'] as const;
+
+    it.each(KINDS.flatMap((kind) => FIELDS.flatMap((field) => BAD_NUMBERS.map((bad) => [kind, field, bad] as const))))(
+      'a %s job keeps what it had when %s becomes %s and takes the other new numbers',
+      (kind, field, bad) => {
+        const q = build();
+        q.add(kind === 'media' ? video() : fileReq());
+        const engine = kind === 'media' ? media : file;
+        const id = jobAt(q, 0).id;
+        engine.emit({ jobId: id, type: 'progress', ...GOOD });
+        clock += 5001; // plain progress is saved at most every five seconds
+        const next = { ...NEXT, [field]: bad } as typeof NEXT;
+        engine.emit({ jobId: id, type: 'progress', ...next });
+
+        const expected = { ...NEXT, [field]: KEPT[field], actualHeight: null };
+        expect(meters(savedJob(id))).toEqual(expected);
+        expectSound(savedJob(id));
+        expect(parseSnapshotFile(JSON.parse(JSON.stringify(saves.at(-1))))).not.toBeNull();
+      },
+    );
+
+    it.each(KINDS.flatMap((kind) => [0, -720, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY].map((bad) => [kind, bad] as const)))(
+      'a %s job that finishes with the height %s saves no height',
+      (kind, bad) => {
+        const q = build();
+        q.add(kind === 'media' ? video() : fileReq());
+        const engine = kind === 'media' ? media : file;
+        const id = jobAt(q, 0).id;
+        engine.emit(progress(id));
+        engine.emit({ jobId: id, type: 'done', fileName: 'Talk.mp4', actualHeight: bad });
+        expect(savedJob(id)).toMatchObject({ state: 'done', actualHeight: null });
+        expectSound(savedJob(id));
+      },
+    );
+
+    it.each([720, 1, 2160])('keeps the real height %s of a finished job', (height) => {
+      const q = build();
+      q.add(video());
+      const id = jobAt(q, 0).id;
+      media.emit(progress(id));
+      media.emit({ jobId: id, type: 'done', fileName: 'Talk.mp4', actualHeight: height });
+      expect(savedJob(id)).toMatchObject({ state: 'done', actualHeight: height });
+    });
+  });
+
   it('saves on every state change', () => {
     const q = build();
     q.add(video());

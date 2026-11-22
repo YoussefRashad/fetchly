@@ -8,11 +8,17 @@ const UNAVAILABLE_TITLES = new Map<string, EntryReason>([
   ['[Deleted video]', 'removed'],
 ]);
 
+/** The most heights a probe returns; the window may send back no more than this. */
+export const MAX_HEIGHTS = 100;
+
 function str(v: unknown): string | null {
   return typeof v === 'string' && v !== '' ? v : null;
 }
 
-/** Parses `yt-dlp -J --flat-playlist` output. Throws when it is not a JSON object. */
+/**
+ * Parses `yt-dlp -J --flat-playlist` output. Throws when it is not a JSON object.
+ * A media probe lists at most MAX_HEIGHTS distinct heights, highest first.
+ */
 export function parseProbe(json: string): MediaProbe {
   const raw: unknown = JSON.parse(json);
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new Error('probe output is not an object');
@@ -39,7 +45,9 @@ export function parseProbe(json: string): MediaProbe {
     const h = typeof f === 'object' && f !== null ? (f as Record<string, unknown>)['height'] : null;
     if (typeof h === 'number' && Number.isFinite(h) && h > 0) heights.add(h);
   }
-  return { kind: 'media', title, thumbnail: str(info['thumbnail']), heights: [...heights].sort((a, b) => b - a) };
+  // Highest first, then cut: heights[0] stays the maximum and only the lowest are dropped.
+  const sorted = [...heights].sort((a, b) => b - a).slice(0, MAX_HEIGHTS);
+  return { kind: 'media', title, thumbnail: str(info['thumbnail']), heights: sorted };
 }
 
 export type Line =

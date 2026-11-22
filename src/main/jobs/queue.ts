@@ -6,11 +6,17 @@ import type { Engine, EngineEvent } from '../engines/engine';
 import { itemBaseName, sanitizeName, uniqueName } from '../naming';
 import { ACTIVE, canApply, transition, type JobEvent } from './state';
 import type { Store } from './store';
+import { isUsableDoneName } from './validate';
 
 export const RETRY_DELAYS_MS = [5000, 20000, 60000];
 const MAX_ATTEMPTS = RETRY_DELAYS_MS.length;
 const NOTIFY_EVERY_MS = 250;
 const SAVE_PROGRESS_EVERY_MS = 5000;
+
+/** A finite, non-negative number, else null. */
+function count(v: number | null): number | null {
+  return v !== null && Number.isFinite(v) && v >= 0 ? v : null;
+}
 
 export interface Finished {
   kind: 'job' | 'group';
@@ -238,7 +244,14 @@ export class Queue {
       case 'progress': {
         const stateChanged = job.state === 'probing';
         const next = stateChanged ? transition(job, { type: 'firstProgress' }) : job;
-        this.replace({ ...next, bytesDone: ev.bytesDone, bytesTotal: ev.bytesTotal ?? next.bytesTotal, speed: ev.speed, eta: ev.eta });
+        // A tool's number that is not a finite count is not stored: the list must load again.
+        this.replace({
+          ...next,
+          bytesDone: count(ev.bytesDone) ?? next.bytesDone,
+          bytesTotal: count(ev.bytesTotal) ?? next.bytesTotal,
+          speed: count(ev.speed) ?? 0,
+          eta: count(ev.eta),
+        });
         if (stateChanged) this.commit();
         else this.progressTick();
         return;
@@ -250,30 +263,44 @@ export class Queue {
         }
         return;
       case 'done': {
-        const next = transition(job, { type: 'done', fileName: ev.fileName, actualHeight: ev.actualHeight });
+        // Only a usable name is saved (isUsableDoneName): one the stored list loads
+        // again, not made only of whitespace and dots. Anything else, a non-string
+        // included, is "finished without a file" (no usable file name), not retried,
+        // and the job keeps its previous name. The media engine reports a missing
+        // file as the same not-retryable failure.
+        if (!isUsableDoneName(ev.fileName)) {
+          this.onFailure(job, { outcome: 'failed', reason: 'finished without a file', retryable: false });
+          return;
+        }
+        const height = (count(ev.actualHeight) ?? 0) > 0 ? ev.actualHeight : null;
+        const next = transition(job, { type: 'done', fileName: ev.fileName, actualHeight: height });
         this.replace({ ...next, bytesDone: next.bytesTotal ?? next.bytesDone });
         this.commit();
         this.announce(job);
         return;
       }
-      case 'error': {
-        if (ev.outcome === 'failed' && ev.retryable && job.attempts < MAX_ATTEMPTS) {
-          const attempts = job.attempts + 1;
-          this.replace({ ...job, state: 'queued', attempts, reason: `retrying (${attempts}/${MAX_ATTEMPTS})`, speed: 0, eta: null });
-          this.waiting.add(job.id);
-          this.setTimer(() => {
-            if (this.waiting.delete(job.id)) this.commit();
-          }, RETRY_DELAYS_MS[attempts - 1] ?? 60000);
-          this.commit();
-          return;
-        }
-        const type = ev.outcome === 'skipped' && canApply(job, 'skip') ? 'skip' : 'fail';
-        this.apply(job.id, { type, reason: ev.reason });
-        this.commit();
-        this.announce(job);
+      case 'error':
+        this.onFailure(job, ev);
         return;
-      }
     }
+  }
+
+  /** A job's engine gave up on it: retried after a delay when it may be, else failed or skipped and announced. */
+  private onFailure(job: Job, ev: { outcome: 'failed' | 'skipped'; reason: string; retryable: boolean }): void {
+    if (ev.outcome === 'failed' && ev.retryable && job.attempts < MAX_ATTEMPTS) {
+      const attempts = job.attempts + 1;
+      this.replace({ ...job, state: 'queued', attempts, reason: `retrying (${attempts}/${MAX_ATTEMPTS})`, speed: 0, eta: null });
+      this.waiting.add(job.id);
+      this.setTimer(() => {
+        if (this.waiting.delete(job.id)) this.commit();
+      }, RETRY_DELAYS_MS[attempts - 1] ?? 60000);
+      this.commit();
+      return;
+    }
+    const type = ev.outcome === 'skipped' && canApply(job, 'skip') ? 'skip' : 'fail';
+    this.apply(job.id, { type, reason: ev.reason });
+    this.commit();
+    this.announce(job);
   }
 
   /** Tells listeners that a lone job, or the whole group of `job`, has nothing left to do. */

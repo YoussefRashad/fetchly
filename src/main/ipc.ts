@@ -1,20 +1,23 @@
 import { existsSync, mkdirSync } from 'node:fs';
-import { join, win32 } from 'node:path';
+import { join } from 'node:path';
 import {
-  HEIGHTS,
   type AddRequest,
   type BinName,
   type BinStatus,
+  type EntryReason,
   type GroupVerb,
   type JobVerb,
+  type PlaylistEntry,
   type ProbeResult,
-  type Quality,
   type Result,
   type Settings,
   type Snapshot,
 } from '../shared/types';
 import { normalizeSettings } from './jobs/store';
+import { everyPosition, isAbsoluteDir, isLangList, isQuality } from './jobs/validate';
+import { sanitizeFileName } from './naming';
 import { InvalidUrl, ProbeError } from './probe';
+import { MAX_HEIGHTS } from './ytdlp/parse';
 
 /** The part of the queue the window can reach. */
 export interface QueueLike {
@@ -58,23 +61,6 @@ function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null;
 }
 
-function isQuality(v: unknown): v is Quality {
-  if (!isObject(v)) return false;
-  if (v['kind'] === 'best') return true;
-  if (v['kind'] === 'max') return (HEIGHTS as readonly unknown[]).includes(v['height']);
-  if (v['kind'] === 'audio') return v['format'] === 'm4a' || v['format'] === 'mp3';
-  return false;
-}
-
-/** Language codes only (en, ar, pt-BR): they end up on yt-dlp's command line. */
-function isLangList(v: unknown): v is string[] {
-  return Array.isArray(v) && v.length <= 10 && v.every((l) => typeof l === 'string' && /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/u.test(l));
-}
-
-function isAbsoluteDir(v: unknown): v is string {
-  return typeof v === 'string' && win32.isAbsolute(v);
-}
-
 function describe(e: unknown): string {
   if (e instanceof InvalidUrl) return 'Enter a link that starts with http:// or https://';
   if (e instanceof ProbeError) return e.reason;
@@ -90,26 +76,62 @@ async function guarded<T>(body: () => Promise<Result<T>>): Promise<Result<T>> {
   }
 }
 
+const ENTRY_REASONS: readonly unknown[] = ['private', 'removed', 'unavailable'] satisfies EntryReason[];
+
+const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
+function acceptsUrl(url: string, validateUrl: (raw: string) => string): boolean {
+  try {
+    validateUrl(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** One playlist entry as the probe gives it; a placeholder (unavailable) may carry any string url. */
+function validEntry(e: unknown, validateUrl: (raw: string) => string): e is PlaylistEntry {
+  if (!isObject(e)) return false;
+  const { index, title, url, unavailable, reason } = e;
+  if (!Number.isInteger(index) || (index as number) < 1) return false;
+  if (typeof title !== 'string' || typeof url !== 'string' || typeof unavailable !== 'boolean') return false;
+  if (unavailable) return ENTRY_REASONS.includes(reason);
+  return reason === null && acceptsUrl(url, validateUrl);
+}
+
+/**
+ * A probe sent back by the window. It may only describe jobs the stored list loads
+ * again: a file name exactly as sanitizeFileName gives it, finite counts and heights,
+ * whole and unique playlist positions. Lists are checked one position at a time
+ * (everyPosition), so a hole fails.
+ */
 function validProbe(probe: unknown, validateUrl: (raw: string) => string): probe is ProbeResult {
   if (!isObject(probe)) return false;
-  if (probe['kind'] === 'media') return typeof probe['title'] === 'string';
+  if (probe['kind'] === 'media') {
+    const heights = probe['heights'];
+    return (
+      typeof probe['title'] === 'string' &&
+      Array.isArray(heights) &&
+      heights.length <= MAX_HEIGHTS &&
+      everyPosition(heights, (h) => isFiniteNumber(h) && h > 0)
+    );
+  }
   if (probe['kind'] === 'file') {
-    const name = probe['fileName'];
-    return typeof name === 'string' && name !== '' && name !== '.' && name !== '..' && !/[\\/]/u.test(name);
+    const { fileName, size, resumable } = probe;
+    return (
+      typeof fileName === 'string' &&
+      fileName === sanitizeFileName(fileName) &&
+      (size === null || (isFiniteNumber(size) && size >= 0)) &&
+      typeof resumable === 'boolean'
+    );
   }
   if (probe['kind'] === 'playlist') {
     const entries = probe['entries'];
     if (typeof probe['title'] !== 'string' || !Array.isArray(entries)) return false;
-    return entries.every((e: unknown) => {
-      if (!isObject(e) || typeof e['index'] !== 'number' || typeof e['title'] !== 'string' || typeof e['url'] !== 'string') return false;
-      if (e['unavailable'] === true) return true;
-      try {
-        validateUrl(e['url']);
-        return true;
-      } catch {
-        return false;
-      }
-    });
+    if (!everyPosition(entries, (e) => validEntry(e, validateUrl))) return false;
+    const positions = new Set<number>();
+    for (const e of entries as PlaylistEntry[]) positions.add(e.index);
+    return positions.size === entries.length;
   }
   return false;
 }
@@ -138,7 +160,8 @@ export function createHandlers(deps: HandlerDeps) {
         if (req.probe.kind === 'playlist') {
           const available = new Set(req.probe.entries.filter((e) => !e.unavailable).map((e) => e.index));
           const wanted = req.selectedIndexes ?? [...available];
-          if (!Array.isArray(wanted) || !wanted.every((i) => available.has(i))) return fail(BAD_REQUEST);
+          // One position at a time, so a hole fails instead of being skipped.
+          if (!Array.isArray(wanted) || !everyPosition(wanted, (i) => typeof i === 'number' && available.has(i))) return fail(BAD_REQUEST);
           if (wanted.length === 0) return fail('Select at least one item');
           selected = wanted;
         }

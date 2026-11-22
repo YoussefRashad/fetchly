@@ -2,7 +2,8 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } fro
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { DEFAULT_SETTINGS, Store } from '../../src/main/jobs/store';
+import { DEFAULT_SETTINGS, normalizeSettings, Store } from '../../src/main/jobs/store';
+import { normalizeSettings as normalizeSettingsOfValidate } from '../../src/main/jobs/validate';
 import type { Group } from '../../src/shared/types';
 import { makeJob, makeSettings } from '../helpers';
 
@@ -32,11 +33,173 @@ describe('Store', () => {
     expect(loaded.settings.maxConcurrent).toBe(3);
   });
 
-  it.each(['probing', 'downloading', 'merging'] as const)('loads a job saved as %s as paused', (state) => {
+  it.each(['probing', 'downloading', 'merging'] as const)('loads a job saved as %s as paused and cut off', (state) => {
     const store = new Store(dir, DOWNLOADS);
     store.saveSnapshot({ jobs: [makeJob({ state, speed: 900, eta: 12, bytesDone: 50 })], groups: [] });
     const [job] = store.load().snapshot.jobs;
-    expect(job).toMatchObject({ state: 'paused', speed: 0, eta: null, bytesDone: 50 });
+    expect(job).toMatchObject({ state: 'paused', speed: 0, eta: null, bytesDone: 50, interrupted: true });
+  });
+
+  it('keeps interrupted on a paused job across a load', () => {
+    const store = new Store(dir, DOWNLOADS);
+    store.saveSnapshot({ jobs: [makeJob({ state: 'paused', interrupted: true })], groups: [] });
+    expect(store.load().snapshot.jobs[0]?.interrupted).toBe(true);
+  });
+
+  it('clears interrupted on a job that is not paused', () => {
+    const store = new Store(dir, DOWNLOADS);
+    store.saveSnapshot({ jobs: [makeJob({ state: 'done', fileName: 'a.mp4', interrupted: true })], groups: [] });
+    expect(store.load().snapshot.jobs[0]?.interrupted).toBe(false);
+  });
+
+  it('loads a jobs file written by the previous version', () => {
+    const old: Record<string, unknown> = { ...makeJob({ state: 'paused', bytesDone: 10 }) };
+    delete old['interrupted'];
+    delete old['sourceHeight'];
+    writeFileSync(join(dir, 'jobs.json'), JSON.stringify({ version: 1, jobs: [old], groups: [] }));
+    const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+    expect(recoveredCorrupt).toBeNull();
+    expect(snapshot.jobs).toEqual([{ ...old, interrupted: false, sourceHeight: null }]);
+  });
+
+  /** A job as the previous version wrote it, as the text of a jobs file. */
+  function previousFile(job: Record<string, unknown>): string {
+    const old: Record<string, unknown> = { ...job };
+    delete old['interrupted'];
+    delete old['sourceHeight'];
+    return JSON.stringify({ version: 1, jobs: [old], groups: [] });
+  }
+
+  describe('file names saved by an earlier version (A1)', () => {
+    const LONG_PAIR = 'a'.repeat(150) + '.' + 'b'.repeat(150);
+
+    it('loads a file job whose name is 150 characters, a dot and 150 more, unchanged', () => {
+      const job = makeJob({ kind: 'file', quality: null, baseName: null, fileName: LONG_PAIR, state: 'paused', bytesDone: 40, bytesTotal: 100 });
+      writeFileSync(join(dir, 'jobs.json'), previousFile({ ...job }));
+      const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+      expect(recoveredCorrupt).toBeNull();
+      expect(readdirSync(dir).filter((f) => f.includes('.corrupt-'))).toEqual([]);
+      expect(snapshot.jobs).toEqual([{ ...job, interrupted: false, sourceHeight: null }]);
+    });
+
+    it.each([255, 256, 1000])('round-trips a file job whose name has %d characters', (length) => {
+      const job = makeJob({ kind: 'file', quality: null, baseName: null, fileName: 'a'.repeat(length), state: 'done' });
+      new Store(dir, DOWNLOADS).saveSnapshot({ jobs: [job], groups: [] });
+      const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs).toEqual([job]);
+    });
+
+    it('still sets aside a file whose file name would leave its folder', () => {
+      const job = makeJob({ kind: 'file', quality: null, baseName: null, fileName: '..\\evil.exe', state: 'done' });
+      writeFileSync(join(dir, 'jobs.json'), previousFile({ ...job }));
+      const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+      expect(snapshot.jobs).toEqual([]);
+      expect(recoveredCorrupt).not.toBeNull();
+    });
+  });
+
+  describe('meters never set the list aside (A3)', () => {
+    it('loads a file of the previous version with eta -5 and actualHeight 0, both as null', () => {
+      const running = { ...makeJob({ id: 'a', state: 'paused', bytesDone: 10 }), eta: -5 };
+      const finished = { ...makeJob({ id: 'b', state: 'done', fileName: 'b.mp4' }), actualHeight: 0 };
+      writeFileSync(join(dir, 'jobs.json'), JSON.stringify({ version: 1, jobs: [running, finished].map((j) => ({ ...j, interrupted: undefined, sourceHeight: undefined })), groups: [] }));
+      const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs).toHaveLength(2);
+      expect(snapshot.jobs[0]).toMatchObject({ id: 'a', eta: null, bytesDone: 10 });
+      expect(snapshot.jobs[1]).toMatchObject({ id: 'b', actualHeight: null, fileName: 'b.mp4' });
+    });
+
+    it('loads a file saved with NaN and infinite meters, which JSON writes as null', () => {
+      const bad = {
+        ...makeJob({ state: 'paused' }),
+        bytesDone: Number.NaN,
+        bytesTotal: Number.NaN,
+        speed: Number.POSITIVE_INFINITY,
+        eta: Number.NEGATIVE_INFINITY,
+        actualHeight: Number.NaN,
+        sourceHeight: Number.NaN,
+      };
+      const store = new Store(dir, DOWNLOADS);
+      store.saveSnapshot({ jobs: [bad], groups: [] });
+      expect(readFileSync(join(dir, 'jobs.json'), 'utf8')).toContain('"bytesDone":null');
+      const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs[0]).toMatchObject({ bytesDone: 0, bytesTotal: null, speed: 0, eta: null, actualHeight: null, sourceHeight: null });
+    });
+
+    it('loads meters of the wrong type or range from a hand-written file', () => {
+      const job = { ...makeJob({ state: 'failed', reason: 'x' }), bytesDone: '5', bytesTotal: -2, speed: -3, eta: 'soon', actualHeight: -720, sourceHeight: '1080' };
+      writeFileSync(join(dir, 'jobs.json'), JSON.stringify({ version: 1, jobs: [job], groups: [] }));
+      const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs[0]).toMatchObject({ bytesDone: 0, bytesTotal: null, speed: 0, eta: null, actualHeight: null, sourceHeight: null });
+    });
+
+    it('still sets the file aside when a meter and another field are bad', () => {
+      const job = { ...makeJob({ state: 'paused' }), eta: -5, attempts: -1 };
+      writeFileSync(join(dir, 'jobs.json'), JSON.stringify({ version: 1, jobs: [job], groups: [] }));
+      expect(new Store(dir, DOWNLOADS).load().recoveredCorrupt).not.toBeNull();
+    });
+
+    it('loads a job cut off while running, with a bad eta, as paused with eta null', () => {
+      const job = { ...makeJob({ state: 'downloading', speed: 5 }), eta: -5 };
+      writeFileSync(join(dir, 'jobs.json'), JSON.stringify({ version: 1, jobs: [job], groups: [] }));
+      const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs[0]).toMatchObject({ state: 'paused', eta: null, speed: 0, interrupted: true });
+    });
+  });
+
+  it('loads a skipped placeholder whose url is a bare video id (A2)', () => {
+    const job = makeJob({ state: 'skipped', reason: 'private', url: 'abc123' });
+    new Store(dir, DOWNLOADS).saveSnapshot({ jobs: [job], groups: [] });
+    const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+    expect(recoveredCorrupt).toBeNull();
+    expect(snapshot.jobs).toEqual([job]);
+  });
+
+  it('sets aside a file whose queued job has a url that is not http (A2)', () => {
+    new Store(dir, DOWNLOADS).saveSnapshot({ jobs: [makeJob({ state: 'queued', url: 'abc123' })], groups: [] });
+    expect(new Store(dir, DOWNLOADS).load().recoveredCorrupt).not.toBeNull();
+  });
+
+  it('sets aside a file whose job has interrupted: null (A5)', () => {
+    const job = { ...makeJob({ state: 'paused' }), interrupted: null };
+    writeFileSync(join(dir, 'jobs.json'), JSON.stringify({ version: 1, jobs: [job], groups: [] }));
+    expect(new Store(dir, DOWNLOADS).load().recoveredCorrupt).not.toBeNull();
+  });
+
+  it('writes a quality without the extra keys a file carried (A6)', () => {
+    const job = { ...makeJob({ state: 'paused' }), quality: { kind: 'best', extra: 123 } };
+    writeFileSync(join(dir, 'jobs.json'), JSON.stringify({ version: 1, jobs: [job], groups: [] }));
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ defaultQuality: { kind: 'audio', format: 'mp3', extra: 1 } }));
+    const store = new Store(dir, DOWNLOADS);
+    const loaded = store.load();
+    expect(loaded.snapshot.jobs[0]?.quality).toStrictEqual({ kind: 'best' });
+    expect(loaded.settings.defaultQuality).toStrictEqual({ kind: 'audio', format: 'mp3' });
+    store.saveSnapshot(loaded.snapshot);
+    expect(readFileSync(join(dir, 'jobs.json'), 'utf8')).not.toContain('extra');
+  });
+
+  it('exports the function validate.ts defines for the settings limits (A8)', () => {
+    expect(normalizeSettings).toBe(normalizeSettingsOfValidate);
+    expect(normalizeSettings(makeSettings({ maxConcurrent: 50, speedLimitKbps: -5 }))).toMatchObject({ maxConcurrent: 8, speedLimitKbps: 0 });
+  });
+
+  it('sets aside a jobs file whose job lacks required fields', () => {
+    const content = '{"jobs":[{"id":"x","state":"done"}],"groups":[]}';
+    writeFileSync(join(dir, 'jobs.json'), content);
+    const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+    expect(snapshot.jobs).toEqual([]);
+    expect(recoveredCorrupt).not.toBeNull();
+    expect(readFileSync(recoveredCorrupt as string, 'utf8')).toBe(content);
+  });
+
+  it('falls back per field when settings.json has a wrong field', () => {
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ subtitleLangs: {}, maxConcurrent: 5 }));
+    expect(new Store(dir, DOWNLOADS).load().settings).toEqual({ ...DEFAULT_SETTINGS(DOWNLOADS), maxConcurrent: 5 });
   });
 
   it.each(['queued', 'paused', 'done', 'failed', 'skipped'] as const)('keeps a job saved as %s', (state) => {

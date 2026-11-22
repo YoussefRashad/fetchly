@@ -1,5 +1,25 @@
 import { describe, expect, it } from 'vitest';
-import { classifyError, parseLine, parseProbe } from '../../src/main/ytdlp/parse';
+import { classifyError, MAX_HEIGHTS, parseLine, parseProbe } from '../../src/main/ytdlp/parse';
+
+/** A yt-dlp video description whose formats have these heights, in this order. */
+const probeJson = (heights: unknown[]): string => JSON.stringify({ title: 'Talk', formats: heights.map((height) => ({ height })) });
+
+/** The heights of a video probe. */
+function heightsOf(json: string): number[] {
+  const probe = parseProbe(json);
+  if (probe.kind !== 'media') throw new Error('expected a video probe');
+  return probe.heights;
+}
+
+/** `count` distinct heights 1..count, highest first. */
+const top = (count: number, from = count): number[] => Array.from({ length: count }, (_, i) => from - i);
+
+/** 1..count in three orders: rising, falling, and a fixed shuffle (7 and the counts used share no factor). */
+const ORDERS = (count: number): [string, number[]][] => [
+  ['rising', Array.from({ length: count }, (_, i) => i + 1)],
+  ['falling', top(count)],
+  ['shuffled', Array.from({ length: count }, (_, i) => ((i * 7) % count) + 1)],
+];
 
 describe('parseProbe', () => {
   it('reads a playlist, marking entries that cannot be downloaded', () => {
@@ -75,6 +95,59 @@ describe('parseProbe', () => {
 
   it('throws on JSON that is not an object', () => {
     expect(() => parseProbe('null')).toThrow();
+  });
+});
+
+describe('parseProbe returns at most MAX_HEIGHTS heights (B3)', () => {
+  it('shares the limit of 100 with the add handler', () => {
+    expect(MAX_HEIGHTS).toBe(100);
+  });
+
+  it.each([0, 1, 2, 99])('keeps all of %d distinct heights', (count) => {
+    expect(heightsOf(probeJson(top(count)))).toEqual(top(count));
+  });
+
+  it.each(ORDERS(100))('keeps all of 100 distinct heights, given %s', (_order, heights) => {
+    expect(heightsOf(probeJson(heights))).toEqual(top(100));
+  });
+
+  it.each(ORDERS(101))('gives 100 of 101 distinct heights, given %s: the maximum first and the lowest dropped', (_order, heights) => {
+    const result = heightsOf(probeJson(heights));
+    expect(result).toHaveLength(100);
+    expect(result[0]).toBe(101);
+    expect(result).not.toContain(1);
+    expect(result).toEqual(top(100, 101));
+  });
+
+  it.each(ORDERS(1000))('gives the highest 100 of 1000 distinct heights, given %s', (_order, heights) => {
+    expect(heightsOf(probeJson(heights))).toEqual(top(100, 1000));
+  });
+
+  it('counts distinct heights, not formats: 300 formats with 100 heights keep all 100', () => {
+    const heights = Array.from({ length: 300 }, (_, i) => (i % 100) + 1);
+    expect(heightsOf(probeJson(heights))).toEqual(top(100));
+  });
+
+  it('counts distinct heights, not formats: 101 heights listed twice give 100, the maximum first', () => {
+    const once = Array.from({ length: 101 }, (_, i) => i + 1);
+    expect(heightsOf(probeJson([...once, ...once]))).toEqual(top(100, 101));
+  });
+
+  it('does not let formats without a usable height use up the limit', () => {
+    const unusable = [null, 0, -5, '720', 'x', true, {}, [], undefined];
+    const usable = Array.from({ length: 100 }, (_, i) => ((i * 7) % 100) + 1);
+    expect(heightsOf(probeJson([...unusable, ...usable]))).toEqual(top(100));
+    expect(heightsOf(probeJson([...usable, ...unusable]))).toEqual(top(100));
+  });
+
+  it('keeps the usual short list as it was, highest first', () => {
+    expect(heightsOf(probeJson([360, 2160, 720, 1080, 720, 144]))).toEqual([2160, 1080, 720, 360, 144]);
+  });
+
+  it('does not cap a playlist: only heights have the limit', () => {
+    const entries = Array.from({ length: 150 }, (_, i) => ({ url: `https://example.com/v/${i + 1}`, title: `Part ${i + 1}` }));
+    const probe = parseProbe(JSON.stringify({ _type: 'playlist', title: 'Long', entries }));
+    expect(probe.kind === 'playlist' && probe.entries).toHaveLength(150);
   });
 });
 

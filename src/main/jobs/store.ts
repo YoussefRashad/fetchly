@@ -1,7 +1,11 @@
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Group, Job, Settings, Snapshot } from '../../shared/types';
+import type { Job, Settings, Snapshot } from '../../shared/types';
 import { ACTIVE } from './state';
+import { normalizeSettings, parseSettings, parseSnapshotFile } from './validate';
+
+// Defined next to the settings parser; still exported here for the existing callers.
+export { normalizeSettings };
 
 export function DEFAULT_SETTINGS(downloadsDir: string): Settings {
   return {
@@ -13,17 +17,6 @@ export function DEFAULT_SETTINGS(downloadsDir: string): Settings {
     preferMp4Max1080: false,
     defaultQuality: { kind: 'best' },
     subtitleLangs: [],
-  };
-}
-
-/** Clamps the numeric settings into their allowed ranges. */
-export function normalizeSettings(s: Settings): Settings {
-  const max = Number.isFinite(s.maxConcurrent) ? Math.floor(s.maxConcurrent) : 3;
-  const limit = Number.isFinite(s.speedLimitKbps) ? Math.floor(s.speedLimitKbps) : 0;
-  return {
-    ...s,
-    maxConcurrent: Math.min(8, Math.max(1, max)),
-    speedLimitKbps: Math.max(0, limit),
   };
 }
 
@@ -62,11 +55,15 @@ export class Store {
   private loadSnapshot(): { snapshot: Snapshot; recoveredCorrupt: string | null } {
     if (!existsSync(this.jobsPath)) return { snapshot: { jobs: [], groups: [] }, recoveredCorrupt: null };
     try {
-      const raw: unknown = JSON.parse(readFileSync(this.jobsPath, 'utf8'));
-      if (!isSnapshotFile(raw)) throw new Error('unexpected shape');
-      // The processes behind active jobs are gone after a restart.
-      const jobs = raw.jobs.map((j) => (ACTIVE.has(j.state) ? { ...j, state: 'paused' as const, speed: 0, eta: null } : j));
-      return { snapshot: { jobs, groups: raw.groups }, recoveredCorrupt: null };
+      const parsed = parseSnapshotFile(JSON.parse(readFileSync(this.jobsPath, 'utf8')));
+      if (!parsed) throw new Error('unexpected shape');
+      const jobs = parsed.jobs.map((j): Job => {
+        // A job that was running when the app last stopped was cut off: its process
+        // may still be alive until a check for leftover processes has run.
+        if (ACTIVE.has(j.state)) return { ...j, state: 'paused', speed: 0, eta: null, interrupted: true };
+        return j.state === 'paused' ? j : { ...j, interrupted: false };
+      });
+      return { snapshot: { jobs, groups: parsed.groups }, recoveredCorrupt: null };
     } catch {
       const aside = `${this.jobsPath}.corrupt-${Date.now()}`;
       renameSync(this.jobsPath, aside);
@@ -78,15 +75,7 @@ export class Store {
     const defaults = DEFAULT_SETTINGS(this.downloadsDir);
     if (!existsSync(this.settingsPath)) return defaults;
     try {
-      const raw: unknown = JSON.parse(readFileSync(this.settingsPath, 'utf8'));
-      if (typeof raw !== 'object' || raw === null) return defaults;
-      const src = raw as Record<string, unknown>;
-      const merged: Record<string, unknown> = { ...defaults };
-      for (const key of Object.keys(defaults)) {
-        // Only known keys, and only when the saved value has the default's type.
-        if (key in src && typeof src[key] === typeof merged[key] && src[key] !== null) merged[key] = src[key];
-      }
-      return normalizeSettings(merged as unknown as Settings);
+      return parseSettings(JSON.parse(readFileSync(this.settingsPath, 'utf8')), defaults);
     } catch {
       return defaults;
     }
@@ -104,15 +93,4 @@ export class Store {
     }
     renameSync(tmp, path);
   }
-}
-
-function isSnapshotFile(raw: unknown): raw is { jobs: Job[]; groups: Group[] } {
-  if (typeof raw !== 'object' || raw === null) return false;
-  const r = raw as Record<string, unknown>;
-  return (
-    Array.isArray(r['jobs']) &&
-    Array.isArray(r['groups']) &&
-    r['jobs'].every((j) => typeof j === 'object' && j !== null && typeof (j as Job).id === 'string' && typeof (j as Job).state === 'string') &&
-    r['groups'].every((g) => typeof g === 'object' && g !== null && typeof (g as Group).id === 'string')
-  );
 }
