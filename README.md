@@ -36,8 +36,9 @@ node node_modules/electron/install.js
 On first start the app shows a one-time setup screen and downloads the three
 tools from their official GitHub release pages. yt-dlp and ffmpeg are checked
 against the checksums published with each release. aria2 publishes none, so
-its checksum is pinned in `src/main/binaries.ts` (`ARIA2_ZIP_SHA256`); while
-that value is empty the setup refuses to install aria2.
+its checksum is pinned in `src/main/binaries.ts` (`ARIA2_ZIP_SHA256`) and the
+download is checked against that value; an empty value would make the setup
+refuse to install aria2.
 
 A build that runs without the dev server:
 
@@ -59,6 +60,10 @@ Windows SmartScreen may warn the first time, because the app is not signed.
 | Download list and settings | `%APPDATA%\hammel\jobs.json`, `settings.json` |
 | The three tools | `%APPDATA%\hammel\bin` |
 
+`%APPDATA%\hammel\bin` belongs to the app alone. At start Hammel ends every
+yt-dlp, ffmpeg or aria2c process running from that folder. Do not start these
+copies by hand.
+
 Closing the window keeps downloads running; the app lives in the tray, and
 **Quit** is in the tray menu.
 
@@ -76,8 +81,9 @@ npm run lint
 npm test
 ```
 
-The tests use no network and no real tools: `tests/fakes` holds a scripted
-stand-in for yt-dlp and an in-process stand-in for aria2. What only real
+The tests use no external network and no real tools; some start a server on
+127.0.0.1 and talk to it. `tests/fakes` holds a scripted stand-in for yt-dlp
+and an in-process stand-in for aria2. What only real
 sites can prove is in [docs/manual-checklist-phase1.md](docs/manual-checklist-phase1.md).
 
 Design: [docs/superpowers/specs/2026-11-22-download-manager-design.md](docs/superpowers/specs/2026-11-22-download-manager-design.md)
