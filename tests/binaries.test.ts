@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { createWriteStream as CreateWriteStream } from 'node:fs';
+import type { createWriteStream as CreateWriteStream, rmSync as RmSync } from 'node:fs';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +12,8 @@ import { makeZip } from './zip';
 
 /** Lets a spec make the file written out of an archive (`<name>.exe.new`) fail with a given error code. */
 const archiveFault = vi.hoisted(() => ({ code: null as string | null }));
+/** While `on`, removing an install's partial files (`<name>.download`, `<name>.exe.new`) throws; `attempts` counts those removals. */
+const cleanupFault = vi.hoisted(() => ({ on: false, attempts: 0 }));
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -20,6 +22,13 @@ vi.mock('node:fs', async (importOriginal) => {
     createWriteStream: (...args: Parameters<typeof CreateWriteStream>) => {
       if (archiveFault.code !== null && String(args[0]).endsWith('.exe.new')) return failingWrite(archiveFault.code)(String(args[0]));
       return actual.createWriteStream(...args);
+    },
+    rmSync: (...args: Parameters<typeof RmSync>) => {
+      if (cleanupFault.on && /\.(download|exe\.new)$/u.test(String(args[0]))) {
+        cleanupFault.attempts += 1;
+        throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+      }
+      return actual.rmSync(...args);
     },
   };
 });
@@ -121,6 +130,8 @@ beforeEach(() => {
   cutOff = new Set();
   hold = null;
   archiveFault.code = null;
+  cleanupFault.on = false;
+  cleanupFault.attempts = 0;
   serveAll();
 });
 
@@ -421,6 +432,19 @@ describe('Binaries: failures while writing and downloading', () => {
     );
     cutOff.add(SOURCES['yt-dlp'].url);
     await expect(make().updateYtDlp()).rejects.toThrow('could not download yt-dlp: the connection was lost');
+  });
+
+  it('keeps the install error when removing the partial file fails too (F4)', async () => {
+    const bins = make();
+    await bins.ensureAll(() => undefined);
+    served.set(ytAsset(), Buffer.from('tampered'));
+    cleanupFault.on = true;
+    const outcome = bins.updateYtDlp();
+    await expect(outcome).rejects.toThrow(ChecksumMismatch);
+    await expect(outcome).rejects.toThrow('the downloaded yt-dlp does not match its published checksum');
+    expect(cleanupFault.attempts).toBeGreaterThan(0); // the cleanup ran and failed
+    expect(readdirSync(binDir)).toContain('yt-dlp.download'); // so the partial file is still there
+    expect(readFileSync(join(binDir, 'yt-dlp.exe'))).toEqual(YT);
   });
 
   it.each(['ENOSPC', 'EACCES', 'EPERM'])('reports %s while taking a file out of an archive', async (code) => {

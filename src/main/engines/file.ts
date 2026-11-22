@@ -187,16 +187,22 @@ export class FileEngine implements Engine {
     }
   }
 
-  /** Sets the speed limit of one running download (null = none). Errors are swallowed: the value is re-sent later. */
-  async setRateLimit(jobId: string, bytesPerSec: number | null): Promise<void> {
+  /**
+   * Sets the speed limit of one running download (null = none). Resolves true only when aria2
+   * answered `aria2.changeOption` without error; false when the job is not tracked, was released,
+   * has no gid, or the call failed. Never rejects.
+   */
+  async setRateLimit(jobId: string, bytesPerSec: number | null): Promise<boolean> {
     const entry = this.tracked.get(jobId);
-    if (!entry) return;
-    await entry.added;
-    if (entry.released || entry.gid === null) return;
+    if (!entry) return false;
     try {
+      await entry.added;
+      if (entry.released || entry.gid === null) return false;
       await entry.rpc.call('aria2.changeOption', [entry.gid, { 'max-download-limit': String(bytesPerSec ?? 0) }]);
+      return true;
     } catch {
-      // aria2 busy or gone: the limit is sent again at the next settings change or start.
+      // aria2 busy or gone: not confirmed. The queue sends it again at the next settings save.
+      return false;
     }
   }
 

@@ -36,7 +36,8 @@ Start from a clean profile for check 1: quit Hammel from the tray and delete
 | 25 | Add a playlist item with **Best available** (the height check runs first). | The file follows the rule of check 4 for that item's height. Note the delay before the download starts. |
 | 26 | Turn on "Always save as mp4", add a video from a source that is not mp4 (for example a webm-only site). | A playable `.mp4` (remux). |
 | 27 | Add a video as **Audio only (mp3)** when the output file already exists; then pause one and resume it. | Both give a working `.mp3` (`-x` with the printed path). |
-| 28 | Close the app, rename `aria2c.exe` in `%APPDATA%\hammel\bin`, start the app. Then restore the file name and press **Retry**. | The banner shows with Retry. After Retry the banner goes and Add works. |
+| 28a | Quit the app from the tray, rename `aria2c.exe` in `%APPDATA%\hammel\bin` to `aria2c.exe.bak`, start the app. Then restore the file name and press **Install**. | The setup screen shows, not the engine banner. After Install nothing is downloaded and the list appears. |
+| 28b | Quit the app from the tray. In `%APPDATA%\hammel\bin` rename `aria2c.exe` to `aria2c.exe.bak` and create an empty file named `aria2c.exe` in its place (all three tools still count as installed, but aria2 cannot start). Start the app. Then, with the app still running, delete the empty `aria2c.exe`, rename `aria2c.exe.bak` back to `aria2c.exe`, and press **Retry** in the banner. | No setup screen: the engine banner shows with Retry, its text starting "The download tools could not be started". After Retry the banner goes and Add works. |
 | 29 | During a file download, end `aria2c.exe` in Task Manager. Then press **Retry** in the banner. | The banner shows and videos keep running. After Retry the banner goes and the file download continues after its own Retry. |
 | 30 | End `aria2c.exe` and do not restart it; let queued file downloads run out their retries. Then press **Retry** in the banner. | The queued file downloads fail after their retries (known limit). After the banner's Retry each one needs Retry. |
 | 31 | During a download make `%APPDATA%\hammel\jobs.json` unwritable, then writable. Also start the app with the file unwritable. | The save banner appears and downloads continue. Once the file is writable the banner goes within a minute. With the file unwritable at start the banner is there from the start. |
@@ -52,7 +53,7 @@ Start from a clean profile for check 1: quit Hammel from the tray and delete
 | 41 | With `taskkill` not available or failing, pause a video while yt-dlp is running. | Note whether an ffmpeg process from the app's folder outlives yt-dlp. |
 | 42 | Make a tool install fail while extracting from the archive with an error other than disk full or a refused folder. | Note the message shown; it is passed through as is. |
 | 43 | Cut the connection while the yt-dlp checksum list is being read. | Note the message shown. |
-| 44 | Until a later fix lands (Task 9 addendum C1): add a playlist where an entry url from yt-dlp starts or ends with a non-ASCII space, then restart the app. | Before the fix the list is set aside as `jobs.json.corrupt-<time>`. After the fix the list loads. |
+| 44 | Add a playlist where an entry url from yt-dlp starts or ends with a non-ASCII space, then restart the app. | The list loads; it is not set aside as `jobs.json.corrupt-<time>`. |
 
 ## Known limits in phase 1
 

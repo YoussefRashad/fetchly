@@ -957,15 +957,72 @@ describe('FileEngine on a controlled clock', () => {
     it.each([
       ['an error answer', () => rpc.refuse.add('aria2.changeOption')],
       ['no answer', () => (rpc.transportDown = true)],
-    ])('swallows a failure of the call (%s)', async (_name, arrange) => {
+    ])('answers false, never rejects, on a failure of the call (%s) (F3)', async (_name, arrange) => {
       rpc.script(active(10, 100, 5));
       const job = fileJob();
       engine.start(job, ctx);
       await untilProgress();
       arrange();
-      await expect(engine.setRateLimit(job.id, 2048)).resolves.toBeUndefined();
+      await expect(engine.setRateLimit(job.id, 2048)).resolves.toBe(false);
       expect(changes()).toHaveLength(1);
       expect(ended()).toBeUndefined();
+    });
+
+    it('answers true when aria2 answered the change (F3)', async () => {
+      rpc.script(active(10, 100, 5));
+      const job = fileJob();
+      engine.start(job, ctx);
+      await untilProgress();
+      await expect(engine.setRateLimit(job.id, 102400)).resolves.toBe(true);
+      await expect(engine.setRateLimit(job.id, null)).resolves.toBe(true);
+      expect(changes()).toHaveLength(2);
+    });
+
+    it('answers true once a held addUri gave the download its gid (F3)', async () => {
+      const release = rpc.hold('aria2.addUri');
+      const job = fileJob();
+      engine.start(job, ctx);
+      const answer = engine.setRateLimit(job.id, 2048);
+      await flush();
+      release();
+      await expect(answer).resolves.toBe(true);
+    });
+
+    it('answers false for a job it does not track (F3)', async () => {
+      await expect(engine.setRateLimit('nobody', 1000)).resolves.toBe(false);
+      expect(rpc.calls).toEqual([]);
+    });
+
+    it('answers false for a job whose stop was confirmed (F3)', async () => {
+      rpc.script(active(10, 100, 5));
+      const job = fileJob();
+      engine.start(job, ctx);
+      await untilProgress();
+      await engine.stop(job.id);
+      await expect(engine.setRateLimit(job.id, 1000)).resolves.toBe(false);
+      expect(changes()).toEqual([]);
+    });
+
+    it('answers false when addUri failed, so the download has no gid (F3)', async () => {
+      rpc.failAddUri = true;
+      const job = fileJob();
+      engine.start(job, ctx);
+      await expect(engine.setRateLimit(job.id, 2048)).resolves.toBe(false);
+      expect(changes()).toEqual([]);
+    });
+
+    it('answers false when the download was released while addUri was pending (F3)', async () => {
+      const release = rpc.hold('aria2.addUri');
+      const job = fileJob();
+      engine.start(job, ctx);
+      const answer = engine.setRateLimit(job.id, 2048);
+      await flush();
+      const b = new FakeAria2();
+      engine.attach(daemonOn(b));
+      release();
+      await expect(answer).resolves.toBe(false);
+      expect(changes()).toEqual([]);
+      expect(b.methods()).not.toContain('aria2.changeOption');
     });
   });
 

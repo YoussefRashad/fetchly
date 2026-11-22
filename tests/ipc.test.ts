@@ -667,8 +667,8 @@ class FakeEngine implements Engine {
   async discard(): Promise<void> {
     return;
   }
-  async setRateLimit(): Promise<void> {
-    return;
+  async setRateLimit(): Promise<boolean> {
+    return true;
   }
 }
 

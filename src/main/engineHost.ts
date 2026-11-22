@@ -8,9 +8,16 @@ export interface EngineHostDeps<Q> {
   killStrays(): Promise<boolean>;
   /** Rejects when aria2 cannot start. */
   startAria2(): Promise<Aria2Daemon>;
-  /** Builds the engines and the queue around a running aria2. Synchronous; may throw. */
+  /** Constructs only: the engines and the queue around a running aria2. Synchronous; may throw. */
   createQueue(daemon: Aria2Daemon, straysCleared: boolean): Q;
-  /** Hands a restarted aria2 to the file engine that createQueue built. */
+  /**
+   * All fallible wiring of a constructed queue: its listeners, the tray, auto-resume and the first
+   * push to the window. Synchronous; may throw. The host hands out the queue only once this returned.
+   */
+  wireQueue(queue: Q): void;
+  /** Shuts down a queue whose wiring failed. The host stops aria2 only after this settled. */
+  disposeQueue(queue: Q): Promise<void>;
+  /** Hands a restarted aria2 to the file engine of the wired queue. */
   attachDaemon(daemon: Aria2Daemon): void;
   /** Called when the status changes (state or message), not otherwise. */
   onStatus(status: EngineStatus): void;
@@ -27,12 +34,16 @@ function same(a: EngineStatus, b: EngineStatus): boolean {
 }
 
 /**
- * Starts the download tools and owns the queue built on them (B17).
+ * Starts the download tools and owns the queue built on them (B17), from construction to
+ * disposal: a queue whose wiring fails is shut down before its aria2 is stopped, and before
+ * any later start can build another one.
  * start() and retry() never reject; their outcome is status(). Only one start or
- * restart runs at a time: a call made while one runs waits for that run.
+ * restart runs at a time: a start or a retry made while one runs waits for that run and
+ * starts nothing itself; with no run, a retry acts only from `error`.
  */
 export class EngineHost<Q> {
   private current: EngineStatus = { state: 'starting' };
+  /** The wired queue; null until wireQueue returned. A queue whose wiring failed is never handed out. */
   private q: Q | null = null;
   /** The running or last started aria2, for quit. */
   private lastDaemon: Aria2Daemon | null = null;
@@ -47,6 +58,7 @@ export class EngineHost<Q> {
     return { ...this.current };
   }
 
+  /** The queue, once built and wired; null before that and after a failed wiring. */
   queue(): Q | null {
     return this.q;
   }
@@ -62,10 +74,14 @@ export class EngineHost<Q> {
     return this.single(() => this.startAll());
   }
 
-  /** Acts only from `error`: a full start without a queue, an aria2 restart with one. */
+  /**
+   * While a start or restart runs (a queue dispose included), joins it and resolves when it has
+   * settled, so the status is that run's outcome. Otherwise acts only from `error`: a full start
+   * without a queue, an aria2 restart with one; in any other state it resolves at once and does nothing.
+   */
   retry(): Promise<void> {
-    if (this.current.state !== 'error') return Promise.resolve();
     if (this.running) return this.running;
+    if (this.current.state !== 'error') return Promise.resolve();
     return this.single(() => (this.q === null ? this.startAll() : this.restartAria2()));
   }
 
@@ -126,6 +142,7 @@ export class EngineHost<Q> {
 
   private async startAll(): Promise<void> {
     let daemon: Aria2Daemon | null = null;
+    let queue: Q;
     try {
       if (!(await this.deps.toolsInstalled())) {
         this.set({ state: 'notInstalled' });
@@ -135,12 +152,27 @@ export class EngineHost<Q> {
       const straysCleared = await this.deps.killStrays();
       daemon = await this.deps.startAria2();
       this.watch(daemon);
-      this.q = this.deps.createQueue(daemon, straysCleared);
+      queue = this.deps.createQueue(daemon, straysCleared);
     } catch (e) {
       if (daemon) await this.abandon(daemon);
       this.fail(e);
       return;
     }
+    try {
+      this.deps.wireQueue(queue);
+    } catch (e) {
+      // The queue goes first: its stops need aria2 to confirm them. No time cap: a dispose
+      // that never settles means no second queue, which is the safe side.
+      try {
+        await this.deps.disposeQueue(queue);
+      } catch {
+        // The wiring failure is what gets reported.
+      }
+      await this.abandon(daemon);
+      this.fail(e);
+      return;
+    }
+    this.q = queue;
     this.settle(daemon);
   }
 

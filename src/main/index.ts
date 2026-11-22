@@ -6,9 +6,10 @@ import { EngineHost } from './engineHost';
 import { FileEngine, startAria2 } from './engines/file';
 import { MediaEngine } from './engines/media';
 import { createHandlers, type Handlers } from './ipc';
-import { Queue } from './jobs/queue';
+import type { Queue } from './jobs/queue';
 import { Store } from './jobs/store';
 import { probeUrl, validateUrl } from './probe';
+import { createQueueLifecycle } from './queueLifecycle';
 import { attachQueue, createTray } from './shell';
 import { killStrays } from './strays';
 
@@ -77,38 +78,40 @@ async function main(): Promise<void> {
 
   /** The last value from queue.onSaveState: the text of the last failed write of jobs.json, or null. */
   let saveError: string | null = null;
-  /** The file engine createQueue built; a restarted aria2 is handed to it. */
-  let fileEngine: FileEngine | null = null;
 
   const appStatus = (): AppStatus => ({ engine: engines.status(), saveError });
   const pushStatus = (): void => send('hammel:status', appStatus());
+
+  // Construct, wire and dispose the queue (F2). After a queue whose wiring failed, the next one
+  // starts from that queue's final list, not from the list read at start.
+  const lifecycle = createQueueLifecycle({
+    store,
+    initial: loaded.snapshot,
+    settings: () => settings,
+    engines: (daemon) => ({
+      media: new MediaEngine({ command: binaries.path('yt-dlp'), prefixArgs: [] }, binaries.path('ffmpeg')),
+      file: new FileEngine(daemon.rpc, { daemonAlive: () => daemon.alive() }),
+    }),
+    send,
+    attachTray: (queue) => {
+      if (tray) attachQueue(tray, queue, showWindow);
+    },
+    onSaveState: (error) => {
+      if (error === saveError) return;
+      saveError = error;
+      pushStatus();
+    },
+  });
 
   const engines = new EngineHost<Queue>({
     toolsInstalled: async () => (await binaries.status()).every((b) => b.installed),
     // A previous run that was killed may have left its tools writing to the partial files.
     killStrays: () => killStrays(binDir),
     startAria2: () => startAria2(binaries.path('aria2c'), join(userData, 'aria2')),
-    createQueue: (daemon, straysCleared) => {
-      const media = new MediaEngine({ command: binaries.path('yt-dlp'), prefixArgs: [] }, binaries.path('ffmpeg'));
-      const file = new FileEngine(daemon.rpc, { daemonAlive: () => daemon.alive() });
-      const queue = new Queue({ store, media, file, initial: loaded.snapshot, settings, straysCleared });
-      fileEngine = file;
-      queue.onChanged((s) => send('hammel:changed', s));
-      queue.onSaveState((error) => {
-        if (error === saveError) return;
-        saveError = error;
-        pushStatus();
-      });
-      if (tray) attachQueue(tray, queue, showWindow);
-      // resumeAllPaused passes over cut-off jobs.
-      if (settings.autoResumeOnStart) queue.resumeAllPaused();
-      send('hammel:changed', queue.snapshot());
-      return queue;
-    },
-    attachDaemon: (daemon) => {
-      if (!fileEngine) throw new Error('the file engine is not running');
-      fileEngine.attach(daemon);
-    },
+    createQueue: lifecycle.createQueue,
+    wireQueue: lifecycle.wireQueue,
+    disposeQueue: lifecycle.disposeQueue,
+    attachDaemon: lifecycle.attachDaemon,
     onStatus: pushStatus,
   });
   host = engines;

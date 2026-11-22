@@ -61,7 +61,8 @@ export interface Finished {
 export interface QueueDeps {
   store: Store;
   media: Engine;
-  file: Engine & { setRateLimit(jobId: string, bytesPerSec: number | null): Promise<void> };
+  /** setRateLimit resolves true only when aria2 confirmed the limit; any other outcome counts as not sent. */
+  file: Engine & { setRateLimit(jobId: string, bytesPerSec: number | null): Promise<boolean> };
   initial: Snapshot;
   settings: Settings;
   /** true = the check for tool processes left by an earlier run succeeded, so no job is cut off. */
@@ -95,7 +96,11 @@ export class Queue {
   private readonly cancelling = new Set<string>();
   /** Per job, the tail of its verb chain. */
   private readonly chains = new Map<string, Promise<void>>();
-  /** Per active job, the rate limit (bytes/s, null = none) it runs with. */
+  /**
+   * Per active job, the rate limit (bytes/s, null = none) it runs with: the one it started with, or
+   * one sent since that aria2 has not refused. A file job's limit that aria2 did not confirm is
+   * removed, so the next settings save sends it again.
+   */
   private readonly limits = new Map<string, number | null>();
   private readonly changedListeners: ((s: Snapshot) => void)[] = [];
   private readonly finishedListeners: ((e: Finished) => void)[] = [];
@@ -127,15 +132,20 @@ export class Queue {
     return { jobs: [...this.jobs], groups: [...this.groups] };
   }
 
+  /** A throw from the listener is swallowed: it stops neither the queue nor the other listeners. */
   onChanged(listener: (s: Snapshot) => void): void {
     this.changedListeners.push(listener);
   }
 
+  /** A throw from the listener is swallowed: it stops neither the queue nor the other listeners. */
   onFinished(listener: (e: Finished) => void): void {
     this.finishedListeners.push(listener);
   }
 
-  /** Calls the listener at once with the current save error (null = the last save worked), then on every change. */
+  /**
+   * Calls the listener at once with the current save error (null = the last save worked), then on every change.
+   * A throw from that first call reaches the caller (a wiring failure); a throw from a later call is swallowed.
+   */
   onSaveState(listener: (error: string | null) => void): void {
     this.saveListeners.push(listener);
     listener(this.saveError);
@@ -280,8 +290,12 @@ export class Queue {
     return this.closing;
   }
 
-  /** The owner confirmed that no tool process of an earlier run is left: no job is cut off any more. */
+  /**
+   * The owner confirmed that no tool process of an earlier run is left: no job is cut off any more.
+   * Does nothing once closing: the marks shutdown sets are about this run's own stops.
+   */
   confirmStraysGone(): void {
+    if (this.closed) return;
     this.jobs = this.jobs.map((j) => (j.interrupted ? { ...j, interrupted: false } : j));
     this.commit();
   }
@@ -549,7 +563,13 @@ export class Queue {
   }
 
   private emitFinished(event: Finished): void {
-    for (const l of this.finishedListeners) l(event);
+    for (const l of this.finishedListeners) {
+      try {
+        l(event);
+      } catch {
+        // A listener that fails stops neither the queue nor the listeners after it.
+      }
+    }
   }
 
   /** Moves queued jobs to probing while slots are free, oldest first. Returns their ids; nothing while closed. */
@@ -623,14 +643,26 @@ export class Queue {
   private setSaveError(error: string | null): void {
     if (error === this.saveError) return;
     this.saveError = error;
-    for (const l of this.saveListeners) l(error);
+    for (const l of this.saveListeners) {
+      try {
+        l(error);
+      } catch {
+        // A listener that fails stops neither the queue nor the listeners after it.
+      }
+    }
   }
 
   private notify(): void {
     this.lastNotify = this.now();
     this.notifyPending = false;
     const snap = this.snapshot();
-    for (const l of this.changedListeners) l(snap);
+    for (const l of this.changedListeners) {
+      try {
+        l(snap);
+      } catch {
+        // A listener that fails stops neither the queue nor the listeners after it (a quit still stops every job).
+      }
+    }
   }
 
   /** One speed budget: each active job's share in bytes/s, null = no limit. Never 0. */
@@ -641,24 +673,40 @@ export class Queue {
     return Math.max(1, Math.floor((speedLimitKbps * 1024) / Math.max(maxConcurrent, active)));
   }
 
-  /** After a settings change: a file job whose share changed is re-limited; a video still probing or downloading is restarted. */
+  /**
+   * After a settings save: a file job whose share changed, or whose last limit aria2 did not confirm,
+   * is re-limited; a video still probing or downloading is restarted.
+   */
   private retune(): void {
     if (this.closed) return;
     const limit = this.share();
     for (const job of this.jobs) {
       if (!ACTIVE.has(job.state) || this.limits.get(job.id) === limit) continue;
-      if (job.kind === 'file') {
-        this.limits.set(job.id, limit);
-        try {
-          // aria2 may be down; the next settings change sends the limit again.
-          this.file.setRateLimit(job.id, limit).catch(noop);
-        } catch {
-          // as above
-        }
-      } else if (job.state !== 'merging') {
-        void this.enqueue(job.id, () => this.restartVerb(job.id));
-      }
+      if (job.kind === 'file') this.sendLimit(job.id, limit);
+      else if (job.state !== 'merging') void this.enqueue(job.id, () => this.restartVerb(job.id));
     }
+  }
+
+  /**
+   * Records the limit as sent, then sends it. When aria2 does not confirm it (false, a rejection or a
+   * throw), the record is removed so the next settings save, even an identical one, sends it again.
+   * The removal is guarded: a newer limit recorded meanwhile is not wiped by this older failure.
+   */
+  private sendLimit(id: string, limit: number | null): void {
+    this.limits.set(id, limit);
+    const forget = (): void => {
+      if (this.limits.get(id) === limit) this.limits.delete(id);
+    };
+    let answer: Promise<boolean>;
+    try {
+      answer = this.file.setRateLimit(id, limit);
+    } catch {
+      forget();
+      return;
+    }
+    void answer.then((confirmed) => {
+      if (confirmed !== true) forget();
+    }, forget);
   }
 
   /** Names held in the folder with this key: every listed job that is not skipped, and every playlist folder in it. */

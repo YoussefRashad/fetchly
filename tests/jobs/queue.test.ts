@@ -40,8 +40,10 @@ class FakeEngine implements Engine {
     this.discarded.push(job.id);
     await this.confirmStop(job.id);
   }
-  async setRateLimit(jobId: string, bytesPerSec: number | null): Promise<void> {
+  /** Records the call; aria2 confirms the limit. */
+  async setRateLimit(jobId: string, bytesPerSec: number | null): Promise<boolean> {
     this.rateLimits.push([jobId, bytesPerSec]);
+    return true;
   }
   emit(ev: EngineEvent): void {
     this.listener(ev);
@@ -66,7 +68,8 @@ let clock: number;
 let finished: { kind: 'job' | 'group'; title: string; failed: number; skipped: number }[];
 let changes: number;
 
-function build(settings: Partial<Settings> = {}, initial: Snapshot = { jobs: [], groups: [] }, straysCleared = true): Queue {
+/** A queue on the fake engines and store, with no listener registered. */
+function buildBare(settings: Partial<Settings> = {}, initial: Snapshot = { jobs: [], groups: [] }, straysCleared = true): Queue {
   const store = {
     saveSnapshot: (s: Snapshot) => {
       log.push('save');
@@ -74,7 +77,7 @@ function build(settings: Partial<Settings> = {}, initial: Snapshot = { jobs: [],
       saves.push(structuredClone(s));
     },
   } as unknown as Store;
-  const queue = new Queue({
+  return new Queue({
     store,
     media,
     file,
@@ -84,6 +87,10 @@ function build(settings: Partial<Settings> = {}, initial: Snapshot = { jobs: [],
     now: () => clock,
     setTimer: (fn, ms) => timers.push({ fn, ms }),
   });
+}
+
+function build(settings: Partial<Settings> = {}, initial: Snapshot = { jobs: [], groups: [] }, straysCleared = true): Queue {
+  const queue = buildBare(settings, initial, straysCleared);
   queue.onFinished((e) => finished.push(e));
   queue.onChanged(() => (changes += 1));
   return queue;
@@ -1118,6 +1125,19 @@ describe('persistence and notifications', () => {
     fire(250);
     expect(changes).toBe(before + 1);
     expect(jobAt(q, 0).bytesDone).toBe(30);
+  });
+
+  it('a notify timer armed before shutdown tells nobody when it fires after it (F4)', async () => {
+    const q = build();
+    q.add(video());
+    const id = jobAt(q, 0).id;
+    media.emit(progress(id, 10)); // the first progress is a state change: notified at once
+    media.emit(progress(id, 20)); // within the notify period: the timer is armed
+    expect(timers.filter((t) => t.ms === 250)).toHaveLength(1);
+    await q.shutdown();
+    const before = changes;
+    fire(250);
+    expect(changes).toBe(before);
   });
 
   it('hands out snapshots that cannot corrupt its state', () => {
@@ -2238,6 +2258,117 @@ describe('one speed budget (7.5)', () => {
     file.emit(done(id, 'a.zip'));
     expect(jobAt(q, 0).state).toBe('done');
   });
+
+  describe('a limit counts as sent only when aria2 confirms it (F3)', () => {
+    const FAILURES: [string, () => Promise<boolean>][] = [
+      ['resolves false', () => Promise.resolve(false)],
+      ['rejects', () => Promise.reject(new Error('aria2 down'))],
+      [
+        'throws synchronously',
+        () => {
+          throw new Error('aria2 down');
+        },
+      ],
+    ];
+
+    it.each(FAILURES)('an identical save sends the limit again when setRateLimit %s', async (_name, answer) => {
+      const q = build();
+      q.add(fileReq());
+      const id = jobAt(q, 0).id;
+      const calls: [string, number | null][] = [];
+      file.setRateLimit = (jobId, n) => {
+        calls.push([jobId, n]);
+        return answer();
+      };
+      set(q, 300);
+      await tick();
+      expect(calls).toEqual([[id, 102400]]);
+      set(q, 300);
+      await tick();
+      expect(calls).toEqual([
+        [id, 102400],
+        [id, 102400],
+      ]);
+      expect(jobAt(q, 0).state).toBe('probing');
+    });
+
+    it('a value other than true counts as not confirmed', async () => {
+      const q = build();
+      q.add(fileReq());
+      const id = jobAt(q, 0).id;
+      const calls: [string, number | null][] = [];
+      file.setRateLimit = (jobId, n) => {
+        calls.push([jobId, n]);
+        return Promise.resolve(undefined as unknown as boolean);
+      };
+      set(q, 300);
+      await tick();
+      set(q, 300);
+      await tick();
+      expect(calls).toEqual([
+        [id, 102400],
+        [id, 102400],
+      ]);
+    });
+
+    it('an identical save does not resend a limit aria2 confirmed', async () => {
+      const q = build();
+      q.add(fileReq());
+      const id = jobAt(q, 0).id;
+      set(q, 300);
+      await tick();
+      set(q, 300);
+      await tick();
+      set(q, 300);
+      await tick();
+      expect(file.rateLimits).toEqual([[id, 102400]]);
+    });
+
+    it('a late failure of an older limit does not wipe a newer confirmed one', async () => {
+      const q = build();
+      q.add(fileReq());
+      const id = jobAt(q, 0).id;
+      const calls: [string, number | null][] = [];
+      let failFirst: (ok: boolean) => void = () => undefined;
+      file.setRateLimit = (jobId, n) => {
+        calls.push([jobId, n]);
+        if (calls.length === 1) return new Promise<boolean>((resolve) => (failFirst = resolve));
+        return Promise.resolve(true);
+      };
+      set(q, 300); // L1, pending
+      set(q, 600); // L2, confirmed
+      await tick();
+      failFirst(false); // L1 fails late
+      await tick();
+      set(q, 600);
+      await tick();
+      expect(calls).toEqual([
+        [id, 102400],
+        [id, 204800],
+      ]);
+    });
+
+    it('a failed limit is resent with the share of the settings of the next save', async () => {
+      const q = build();
+      q.add(fileReq());
+      const id = jobAt(q, 0).id;
+      const answers = [false, true];
+      file.setRateLimit = async (jobId, n) => {
+        file.rateLimits.push([jobId, n]);
+        return answers.shift() ?? true;
+      };
+      set(q, 300);
+      await tick();
+      set(q, 600);
+      await tick();
+      set(q, 600);
+      await tick();
+      expect(file.rateLimits).toEqual([
+        [id, 102400],
+        [id, 204800],
+      ]);
+    });
+  });
 });
 
 describe('shutdown (7.6)', () => {
@@ -2540,6 +2671,141 @@ describe('shutdown (7.6)', () => {
   });
 });
 
+describe('a failing listener never stops the queue (G1)', () => {
+  const thrower = (): never => {
+    throw new Error('listener broke');
+  };
+
+  /** A queue with an active video and an active file download: [video id, file id]. */
+  function twoActive(): { q: Queue; v: string; f: string } {
+    const q = build();
+    q.add(video());
+    q.add(fileReq());
+    const v = q.snapshot().jobs.find((j) => j.kind === 'media')?.id;
+    const f = q.snapshot().jobs.find((j) => j.kind === 'file')?.id;
+    if (v === undefined || f === undefined) throw new Error('no active jobs');
+    expect(states(q)).toEqual(['probing', 'probing']);
+    return { q, v, f };
+  }
+
+  describe('during shutdown', () => {
+    it('a changed listener that always throws: shutdown resolves, each job gets its stop, saved first, then paused and not cut off', async () => {
+      const { q, v, f } = twoActive();
+      q.onChanged(thrower);
+      const from = log.length;
+      await expect(q.shutdown()).resolves.toBeUndefined();
+      expect(media.stopped).toEqual([v]);
+      expect(file.stopped).toEqual([f]);
+      const during = log.slice(from);
+      expect(during.indexOf('save')).toBeGreaterThanOrEqual(0);
+      expect(during.indexOf('save')).toBeLessThan(during.indexOf('stop'));
+      expect(saves.at(-1)?.jobs.map((j) => [j.id, j.state, j.interrupted])).toEqual([
+        [v, 'paused', false],
+        [f, 'paused', false],
+      ]);
+      expect(loadedLastSave()).not.toBeNull();
+    });
+
+    it('the same with one stop that fails: that job stays cut off and the other is cleared', async () => {
+      const { q, v, f } = twoActive();
+      q.onChanged(thrower);
+      media.stopFails.add(v);
+      await expect(q.shutdown()).resolves.toBeUndefined();
+      expect(media.stopped).toEqual([v]);
+      expect(file.stopped).toEqual([f]);
+      expect(saves.at(-1)?.jobs.map((j) => [j.id, j.state, j.interrupted])).toEqual([
+        [v, 'paused', true],
+        [f, 'paused', false],
+      ]);
+      expect(q.snapshot().jobs.map((j) => j.interrupted)).toEqual([true, false]);
+    });
+
+    it('a save listener that throws on every call after registration, with the store failing: shutdown resolves and the stops are attempted', async () => {
+      const { q, v, f } = twoActive();
+      let registered = false;
+      q.onSaveState(() => {
+        if (registered) throw new Error('listener broke');
+      });
+      registered = true;
+      saveFails.on = true;
+      await expect(q.shutdown()).resolves.toBeUndefined();
+      expect(media.stopped).toEqual([v]);
+      expect(file.stopped).toEqual([f]);
+      expect(q.snapshot().jobs.map((j) => [j.state, j.interrupted])).toEqual([
+        ['paused', false],
+        ['paused', false],
+      ]);
+    });
+  });
+
+  describe('no starving: the first listener throws and the second still gets the value', () => {
+    it('changed listeners', () => {
+      const q = buildBare();
+      const got: Snapshot[] = [];
+      q.onChanged(thrower);
+      q.onChanged((s) => void got.push(s));
+      q.add(video());
+      expect(got).toHaveLength(1);
+      expect(got[0]?.jobs).toHaveLength(1);
+      expect(got[0]?.jobs[0]?.state).toBe('probing');
+    });
+
+    it('save-state listeners', () => {
+      const q = buildBare();
+      const got: (string | null)[] = [];
+      let registered = false;
+      q.onSaveState(() => {
+        if (registered) throw new Error('listener broke');
+      });
+      registered = true;
+      q.onSaveState((e) => void got.push(e));
+      saveFails.on = true;
+      q.add(video());
+      expect(got).toEqual([null, saveMessage('disk full')]);
+    });
+
+    it('finished listeners', () => {
+      const q = buildBare();
+      const got: { kind: 'job' | 'group'; title: string; failed: number; skipped: number }[] = [];
+      q.onFinished(thrower);
+      q.onFinished((e) => void got.push(e));
+      q.add(video('Talk'));
+      media.emit(done(jobAt(q, 0).id));
+      expect(got).toEqual([{ kind: 'job', title: 'Talk', failed: 0, skipped: 0 }]);
+    });
+  });
+
+  describe('outside shutdown', () => {
+    it('with a throwing changed listener, add does not throw, and the job is started and saved', () => {
+      const q = build();
+      q.onChanged(thrower);
+      expect(() => q.add(video())).not.toThrow();
+      expect(states(q)).toEqual(['probing']);
+      expect(media.started).toHaveLength(1);
+      expect(saves.at(-1)?.jobs.map((j) => j.state)).toEqual(['probing']);
+    });
+
+    it("with a throwing finished listener, the engine's done event does not throw, and the job is done and saved", () => {
+      const q = build();
+      q.onFinished(thrower);
+      q.add(video());
+      const id = jobAt(q, 0).id;
+      expect(() => media.emit(done(id))).not.toThrow();
+      expect(jobAt(q, 0).state).toBe('done');
+      expect(saves.at(-1)?.jobs.map((j) => j.state)).toEqual(['done']);
+    });
+  });
+
+  it('onSaveState with a listener that throws at registration still throws to the caller', () => {
+    const q = build();
+    expect(() =>
+      q.onSaveState(() => {
+        throw new Error('wiring broke');
+      }),
+    ).toThrow('wiring broke');
+  });
+});
+
 describe('jobs cut off by a crash (7.7)', () => {
   const KINDS = ['media', 'file'] as const;
   type Kind = (typeof KINDS)[number];
@@ -2648,6 +2914,42 @@ describe('jobs cut off by a crash (7.7)', () => {
     const before = q.snapshot();
     expect(() => q.confirmStraysGone()).not.toThrow();
     expect(q.snapshot()).toEqual(before);
+  });
+
+  it('a confirmation made while closing clears no mark: a job whose stop failed stays cut off (F1)', async () => {
+    const q = build();
+    q.add(video('A'));
+    q.add(video('B'));
+    const [a, b] = ids(q) as [string, string];
+    const release = holdStops();
+    media.stopFails.add(b);
+    const shutting = q.shutdown();
+    await tick();
+    expect([...media.stopped].sort()).toEqual([a, b].sort()); // both stops are pending
+    const savesBefore = saves.length;
+    q.confirmStraysGone();
+    expect(saves.length).toBe(savesBefore); // returned at once: nothing saved
+    expect(interrupted(q)).toEqual([true, true]);
+    release();
+    await shutting;
+    expect(saves.at(-1)?.jobs.map((j) => [j.id, j.state, j.interrupted])).toEqual([
+      [a, 'paused', false],
+      [b, 'paused', true],
+    ]);
+    expect(interrupted(q)).toEqual([false, true]);
+  });
+
+  it('a confirmation after shutdown has settled clears no mark either (F1)', async () => {
+    const q = build();
+    q.add(video('A'));
+    const [a] = ids(q) as [string];
+    media.stopFails.add(a);
+    await q.shutdown();
+    const savesBefore = saves.length;
+    q.confirmStraysGone();
+    expect(saves.length).toBe(savesBefore);
+    expect(interrupted(q)).toEqual([true]);
+    expect(saves.at(-1)?.jobs[0]?.interrupted).toBe(true);
   });
 
   it('a resume reads the flag when it runs, so a confirmation made right after it still counts', async () => {

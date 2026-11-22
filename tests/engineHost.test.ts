@@ -37,6 +37,9 @@ class FakeDaemon implements Aria2Daemon {
   private ended = false;
   private readonly listeners: (() => void)[] = [];
 
+  /** `log`: where stop() records 'daemon.stop'. */
+  constructor(private readonly log: string[] = []) {}
+
   alive(): boolean {
     return this.up;
   }
@@ -46,6 +49,7 @@ class FakeDaemon implements Aria2Daemon {
   }
 
   async stop(): Promise<void> {
+    this.log.push('daemon.stop');
     this.stops += 1;
     this.up = false;
     if (this.stopFails) throw new Error('could not stop aria2');
@@ -88,6 +92,12 @@ interface Control {
   toolsError: unknown;
   killError: unknown;
   createError: unknown;
+  /** what wireQueue throws; null = it wires */
+  wireError: unknown;
+  /** while set, disposeQueue waits for it */
+  holdDispose: Gate | null;
+  /** what disposeQueue rejects with; null = it resolves */
+  disposeError: unknown;
   attachError: unknown;
   /** what happens to the daemon while createQueue runs */
   createKills: 'no' | 'quietly' | 'with an event';
@@ -102,6 +112,8 @@ function harness() {
   const daemons: FakeDaemon[] = [];
   const queues: FakeQueue[] = [];
   const created: { daemon: Aria2Daemon; straysCleared: boolean }[] = [];
+  const wired: FakeQueue[] = [];
+  const disposed: FakeQueue[] = [];
   const attached: Aria2Daemon[] = [];
   const control: Control = {
     installed: true,
@@ -113,6 +125,9 @@ function harness() {
     toolsError: null,
     killError: null,
     createError: null,
+    wireError: null,
+    holdDispose: null,
+    disposeError: null,
     attachError: null,
     createKills: 'no',
     attachKills: 'no',
@@ -122,10 +137,12 @@ function harness() {
   const seen: {
     atAttach: EngineStatus[];
     atCreate: EngineStatus[];
+    atWire: EngineStatus[];
     queueAtAttach: (FakeQueue | null)[];
+    queueAtWire: (FakeQueue | null)[];
     daemonAtCreate: (Aria2Daemon | null)[];
     daemonAtAttach: (Aria2Daemon | null)[];
-  } = { atAttach: [], atCreate: [], queueAtAttach: [], daemonAtCreate: [], daemonAtAttach: [] };
+  } = { atAttach: [], atCreate: [], atWire: [], queueAtAttach: [], queueAtWire: [], daemonAtCreate: [], daemonAtAttach: [] };
 
   const deps: EngineHostDeps<FakeQueue> = {
     toolsInstalled: async () => {
@@ -145,7 +162,7 @@ function harness() {
       if (control.holdStart) await control.holdStart.wait;
       const next = control.starts.shift();
       if (next !== undefined && next !== 'ok') throw next;
-      const daemon = new FakeDaemon();
+      const daemon = new FakeDaemon(log);
       daemon.stopFails = control.stopFails;
       daemons.push(daemon);
       return daemon;
@@ -162,6 +179,20 @@ function harness() {
       const queue = { id: queues.length };
       queues.push(queue);
       return queue;
+    },
+    wireQueue: (queue) => {
+      log.push('wireQueue');
+      seen.atWire.push(host.status());
+      seen.queueAtWire.push(host.queue());
+      if (control.wireError !== null) throw control.wireError;
+      wired.push(queue);
+    },
+    disposeQueue: async (queue) => {
+      log.push('disposeQueue');
+      disposed.push(queue);
+      if (control.holdDispose) await control.holdDispose.wait;
+      log.push('disposed');
+      if (control.disposeError !== null) throw control.disposeError;
     },
     attachDaemon: (daemon) => {
       log.push('attachDaemon');
@@ -180,12 +211,12 @@ function harness() {
   const host = new EngineHost<FakeQueue>(deps);
   const calls = (name: string): number => log.filter((l) => l === name).length;
   /** Makes the next call of that step wait until the gate is opened. */
-  const hold = (step: 'holdTools' | 'holdKill' | 'holdStart'): Gate => {
+  const hold = (step: 'holdTools' | 'holdKill' | 'holdStart' | 'holdDispose'): Gate => {
     const g = gate();
     control[step] = g;
     return g;
   };
-  return { host, deps, log, statuses, daemons, queues, created, attached, control, seen, calls, hold };
+  return { host, deps, log, statuses, daemons, queues, created, wired, disposed, attached, control, seen, calls, hold };
 }
 
 type Harness = ReturnType<typeof harness>;
@@ -238,10 +269,10 @@ describe('EngineHost (9.2)', () => {
     expect(h.daemons[0]?.stops).toBe(0);
   });
 
-  it('checks the tools, then old processes, then starts aria2, then builds the queue', async () => {
+  it('checks the tools, then old processes, then starts aria2, then builds and wires the queue', async () => {
     const h = harness();
     await h.host.start();
-    expect(h.log).toEqual(['toolsInstalled', 'killStrays', 'startAria2', 'createQueue']);
+    expect(h.log).toEqual(['toolsInstalled', 'killStrays', 'startAria2', 'createQueue', 'wireQueue']);
   });
 
   it('is starting, with no queue, while the engines come up', async () => {
@@ -424,7 +455,7 @@ describe('EngineHost (9.2)', () => {
       h.control.starts = [new Error('x')];
       await h.host.start();
       await h.host.retry();
-      expect(h.log.filter((l) => l !== 'toolsInstalled')).toEqual(['killStrays', 'startAria2', 'killStrays', 'startAria2', 'createQueue']);
+      expect(h.log.filter((l) => l !== 'toolsInstalled')).toEqual(['killStrays', 'startAria2', 'killStrays', 'startAria2', 'createQueue', 'wireQueue']);
     });
 
     it.each([
@@ -470,16 +501,19 @@ describe('EngineHost (9.2)', () => {
       expect(missing.log).toEqual(before);
       expect(missing.host.status()).toEqual(NOT_INSTALLED);
 
-      // starting, while a start is running
+      // starting, while a start is running: the retry joins that run (G2) and starts nothing itself
       const busy = harness();
       const startGate = busy.hold('holdStart');
       const running = busy.host.start();
       await flush();
-      await busy.host.retry();
+      const joined = busy.host.retry();
+      await flush();
       expect(busy.calls('startAria2')).toBe(1);
       expect(busy.calls('killStrays')).toBe(1);
       startGate.open();
-      await running;
+      await Promise.all([running, joined]);
+      expect(busy.calls('startAria2')).toBe(1);
+      expect(busy.calls('killStrays')).toBe(1);
 
       // ready
       const ready = await readyHost();
@@ -492,19 +526,46 @@ describe('EngineHost (9.2)', () => {
       expect(ready.host.daemon()).toBe(ready.daemons[0]);
     });
 
-    it('resolves at once while a start is running', async () => {
+    it('waits for the run in progress and starts nothing itself', async () => {
       const h = harness();
       const startGate = h.hold('holdStart');
       const running = h.host.start();
       await flush();
       let settled = false;
-      void h.host.retry().then(() => {
+      const retried = h.host.retry().then(() => {
         settled = true;
       });
       await flush();
-      expect(settled).toBe(true);
+      expect(settled).toBe(false);
       startGate.open();
       await running;
+      await retried;
+      expect(settled).toBe(true);
+      expect(h.calls('startAria2')).toBe(1);
+      expect(h.host.status()).toEqual(READY);
+    });
+
+    it('a retry during a held aria2 restart joins it: one startAria2 for that restart', async () => {
+      const h = await readyHost();
+      h.daemons[0]?.die();
+      const startGate = h.hold('holdStart');
+      const restarting = h.host.retry();
+      await flush();
+      expect(h.host.status()).toEqual(STARTING);
+      let settled = false;
+      const joined = h.host.retry().then(() => {
+        settled = true;
+      });
+      await flush();
+      expect(settled).toBe(false);
+      expect(h.calls('startAria2')).toBe(2); // the first start and this restart
+      startGate.open();
+      await Promise.all([restarting, joined]);
+      expect(settled).toBe(true);
+      expect(h.calls('startAria2')).toBe(2);
+      expect(h.calls('attachDaemon')).toBe(1);
+      expect(h.host.status()).toEqual(READY);
+      expect(h.statuses).toEqual([READY, stopped, STARTING, READY]);
     });
 
     it('two retries at once start the engines once', async () => {
@@ -553,7 +614,7 @@ describe('EngineHost (9.2)', () => {
         await flush();
         g.open();
         await Promise.all(all);
-        expect(h.log, step).toEqual(['toolsInstalled', 'killStrays', 'startAria2', 'createQueue']);
+        expect(h.log, step).toEqual(['toolsInstalled', 'killStrays', 'startAria2', 'createQueue', 'wireQueue']);
         expect(h.statuses, step).toEqual([READY]);
       }
     });
@@ -922,6 +983,160 @@ describe('EngineHost: aria2 exits while running (9.4)', () => {
       expect(h.attached).toEqual([h.daemons[1], h.daemons[2]]);
       expect(h.calls('killStrays')).toBe(1);
       expect(h.calls('createQueue')).toBe(1);
+    });
+  });
+});
+
+describe('EngineHost: the host owns a queue from construction to disposal (F2)', () => {
+  /** The calls from the queue build on: construct, wire, dispose, and the daemon stop. */
+  const queueSteps = (h: Harness): string[] => h.log.slice(h.log.indexOf('createQueue'));
+
+  describe('wiring throws', () => {
+    it.each([
+      ['an Error', new Error('tray broke'), 'tray broke'],
+      ['a text', 'tray broke', 'tray broke'],
+    ])('disposes the queue, then stops aria2, then reports the wiring error (%s)', async (_name, thrown, text) => {
+      const h = harness();
+      h.control.wireError = thrown;
+      await expect(h.host.start()).resolves.toBeUndefined();
+      expect(queueSteps(h)).toEqual(['createQueue', 'wireQueue', 'disposeQueue', 'disposed', 'daemon.stop']);
+      expect(h.disposed).toEqual([h.queues[0]]);
+      expect(h.host.status()).toEqual(failed(text));
+      expect(h.statuses).toEqual([failed(text)]);
+      expect(h.host.queue()).toBeNull();
+      expect(h.daemons[0]?.stops).toBe(1);
+    });
+
+    it('stops aria2 only once the dispose has settled', async () => {
+      const h = harness();
+      h.control.wireError = new Error('tray broke');
+      const disposing = h.hold('holdDispose');
+      const running = h.host.start();
+      await flush();
+      expect(h.calls('disposeQueue')).toBe(1);
+      expect(h.daemons[0]?.stops).toBe(0);
+      expect(h.host.status()).toEqual(STARTING);
+      expect(h.host.queue()).toBeNull();
+      disposing.open();
+      await running;
+      expect(h.daemons[0]?.stops).toBe(1);
+      expect(h.host.status()).toEqual(failed('tray broke'));
+    });
+
+    it('a dispose that rejects still ends in the wiring error, and a later Retry works', async () => {
+      const h = harness();
+      h.control.wireError = new Error('tray broke');
+      h.control.disposeError = new Error('shutdown broke');
+      await expect(h.host.start()).resolves.toBeUndefined();
+      expect(queueSteps(h)).toEqual(['createQueue', 'wireQueue', 'disposeQueue', 'disposed', 'daemon.stop']);
+      expect(h.host.status()).toEqual(failed('tray broke'));
+      expect(h.statuses).toEqual([failed('tray broke')]);
+      expect(h.host.queue()).toBeNull();
+      h.control.wireError = null;
+      h.control.disposeError = null;
+      await h.host.retry();
+      expect(h.host.status()).toEqual(READY);
+      expect(h.calls('createQueue')).toBe(2);
+      expect(h.host.queue()).toBe(h.queues[1]);
+      expect(h.host.daemon()).toBe(h.daemons[1]);
+      expect(h.wired).toEqual([h.queues[1]]);
+    });
+
+    it('still ends in the wiring error when the aria2 it stops cannot be stopped', async () => {
+      const h = harness();
+      h.control.wireError = new Error('tray broke');
+      h.control.stopFails = true;
+      await expect(h.host.start()).resolves.toBeUndefined();
+      expect(h.host.status()).toEqual(failed('tray broke'));
+      expect(h.host.queue()).toBeNull();
+    });
+
+    it('builds no second queue while the first one is being disposed; Retry then builds exactly one', async () => {
+      const h = harness();
+      h.control.wireError = new Error('tray broke');
+      const disposing = h.hold('holdDispose');
+      const settled = { start: false, retry: false, again: false };
+      const first = h.host.start().then(() => void (settled.start = true));
+      await flush();
+      expect(h.calls('disposeQueue')).toBe(1);
+      h.control.wireError = null;
+      // A Retry and a start made meanwhile.
+      const retried = h.host.retry().then(() => void (settled.retry = true));
+      const again = h.host.start().then(() => void (settled.again = true));
+      await flush();
+      expect(h.calls('createQueue')).toBe(1);
+      expect(h.calls('startAria2')).toBe(1);
+      expect(h.calls('killStrays')).toBe(1);
+      expect(settled.again).toBe(false); // a start waits for the run that disposes
+      expect(settled.retry).toBe(false); // and so does a Retry (G2)
+      disposing.open();
+      h.control.holdDispose = null;
+      await Promise.all([first, retried, again]);
+      expect(settled).toEqual({ start: true, retry: true, again: true });
+      // Nothing was built before the dispose settled: the first run ends in its error.
+      expect(h.calls('createQueue')).toBe(1);
+      expect(h.host.status()).toEqual(failed('tray broke'));
+      expect(h.host.queue()).toBeNull();
+      // The Retry the banner then offers builds exactly one queue.
+      await Promise.all([h.host.retry(), h.host.retry()]);
+      expect(h.calls('createQueue')).toBe(2);
+      expect(h.log.indexOf('createQueue', h.log.indexOf('disposed'))).toBeGreaterThan(h.log.indexOf('disposed'));
+      expect(h.host.status()).toEqual(READY);
+      expect(h.host.queue()).toBe(h.queues[1]);
+    });
+
+    it('an aria2 exit while the queue is disposed is not reported over the wiring error', async () => {
+      const h = harness();
+      h.control.wireError = new Error('tray broke');
+      const disposing = h.hold('holdDispose');
+      const running = h.host.start();
+      await flush();
+      h.daemons[0]?.die();
+      disposing.open();
+      await running;
+      expect(h.statuses).toEqual([failed('tray broke')]);
+    });
+  });
+
+  it('a createQueue that throws disposes nothing and wires nothing', async () => {
+    const h = harness();
+    h.control.createError = new Error('jobs.json unreadable');
+    await h.host.start();
+    expect(h.calls('wireQueue')).toBe(0);
+    expect(h.calls('disposeQueue')).toBe(0);
+    expect(h.daemons[0]?.stops).toBe(1);
+  });
+
+  describe('wiring succeeds', () => {
+    it('hands out the queue only after wireQueue returned, and goes ready', async () => {
+      const h = harness();
+      await h.host.start();
+      expect(h.seen.queueAtWire).toEqual([null]);
+      expect(h.seen.atWire).toEqual([STARTING]);
+      expect(h.wired).toEqual([h.queues[0]]);
+      expect(h.host.queue()).toBe(h.queues[0]);
+      expect(h.host.status()).toEqual(READY);
+      expect(h.calls('disposeQueue')).toBe(0);
+      expect(h.daemons[0]?.stops).toBe(0);
+    });
+
+    it('wires the queue that createQueue built, with the aria2 it was built on still running', async () => {
+      const h = harness();
+      await h.host.start();
+      expect(h.created[0]?.daemon).toBe(h.daemons[0]);
+      expect(h.wired[0]).toBe(h.queues[0]);
+    });
+
+    it('an aria2 that died while the queue was wired is reported, not hidden by ready', async () => {
+      const h = harness();
+      h.deps.wireQueue = (queue) => {
+        h.log.push('wireQueue');
+        h.daemons[0]?.die();
+        h.wired.push(queue);
+      };
+      await h.host.start();
+      expect(h.host.status()).toEqual(stopped);
+      expect(h.host.queue()).toBe(h.queues[0]);
     });
   });
 });
