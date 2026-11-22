@@ -97,6 +97,10 @@ function download(name) {
     case 'probe-garbage':
       out('this is not json');
       break;
+    case 'probe-killed':
+      // Ended from outside (Stop-Process -Force): no output and no ERROR line of its own.
+      process.exitCode = 1;
+      break;
     case 'probe-hang':
       setInterval(() => {}, 1000);
       break;

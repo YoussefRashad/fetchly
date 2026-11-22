@@ -13,6 +13,7 @@ import { probeUrl, validateUrl } from './probe';
 import { createQueueLifecycle } from './queueLifecycle';
 import { attachQueue, createTray } from './shell';
 import { killStrays } from './strays';
+import { ToolGate } from './toolGate';
 
 let win: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -76,6 +77,9 @@ async function main(): Promise<void> {
 
   const binDir = join(userData, 'bin');
   const binaries = new Binaries(binDir);
+  // The start-up cleanup ends every tool started from binDir; the window's own tool runs
+  // (probe, version check, yt-dlp update) wait for it instead of being ended by it.
+  const tools = new ToolGate();
 
   /** The last value from queue.onSaveState: the text of the last failed write of jobs.json, or null. */
   let saveError: string | null = null;
@@ -108,7 +112,7 @@ async function main(): Promise<void> {
   const engines = new EngineHost<Queue>({
     toolsInstalled: async () => (await binaries.status()).every((b) => b.installed),
     // A previous run that was killed may have left its tools writing to the partial files.
-    killStrays: () => killStrays(binDir),
+    killStrays: () => tools.exclusive(() => killStrays(binDir)),
     startAria2: () => startAria2(binaries.path('aria2c'), join(userData, 'aria2')),
     createQueue: lifecycle.createQueue,
     wireQueue: lifecycle.wireQueue,
@@ -128,8 +132,12 @@ async function main(): Promise<void> {
       store.saveSettings(s);
     },
     validateUrl,
-    probe: (url) => probeUrl(url, { command: binaries.path('yt-dlp'), prefixArgs: [] }),
-    binaries,
+    probe: (url) => tools.shared(() => probeUrl(url, { command: binaries.path('yt-dlp'), prefixArgs: [] })),
+    binaries: {
+      status: () => tools.shared(() => binaries.status()),
+      ensureAll: (onProgress) => binaries.ensureAll(onProgress),
+      updateYtDlp: () => tools.shared(() => binaries.updateYtDlp()),
+    },
     onInstallProgress: (name, pct) => send('fetchly:installProgress', name, pct),
     afterInstall: () => engines.start(),
     pickFolder: async () => {
