@@ -106,3 +106,27 @@ export interface BinStatus {
   installed: boolean;
   version: string | null;
 }
+
+export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
+
+/** What the window may ask the main process to do. Exposed as `window.hammel`. */
+export interface HammelApi {
+  probe(url: string): Promise<Result<ProbeResult>>;
+  add(req: AddRequest): Promise<Result<null>>;
+  job(id: string, verb: JobVerb): Promise<Result<null>>;
+  group(id: string, verb: GroupVerb): Promise<Result<null>>;
+  snapshot(): Promise<Snapshot>;
+  /** Returns the function that stops listening. */
+  onChanged(cb: (s: Snapshot) => void): () => void;
+  getSettings(): Promise<Settings>;
+  setSettings(s: Settings): Promise<Result<Settings>>;
+  pickFolder(): Promise<string | null>;
+  openFile(jobId: string): Promise<Result<null>>;
+  openFolder(jobId: string): Promise<Result<null>>;
+  binaries(): Promise<BinStatus[]>;
+  installBinaries(): Promise<Result<null>>;
+  onInstallProgress(cb: (name: BinName, pct: number) => void): () => void;
+  updateYtDlp(): Promise<Result<string>>;
+  /** A one-time message about something that happened at startup, or null. */
+  startupNotice(): Promise<string | null>;
+}
