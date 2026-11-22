@@ -9,6 +9,7 @@
   --accent-text: #ffffff;
   --ok: #1a7f37;
   --bad: #c62828;
+  --warn: #b26a00;
   --bar: #e4e7ec;
   font: 14px/1.45 'Segoe UI', system-ui, sans-serif;
 }
@@ -24,6 +25,7 @@
     --accent-text: #0b1220;
     --ok: #4ac26b;
     --bad: #ff6b6b;
+    --warn: #f0b429;
     --bar: #2e323b;
   }
 }
@@ -156,6 +158,19 @@ small {
   background: var(--panel);
   border: 1px solid var(--bad);
   border-radius: 6px;
+}
+
+/* Persistent banners (engine, save, cut-off): no close button; they go when their cause does. */
+.banner.persistent {
+  border-left-width: 4px;
+}
+
+.banner.persistent button {
+  flex: none;
+}
+
+.banner-cutOff {
+  border-color: var(--warn);
 }
 
 main {

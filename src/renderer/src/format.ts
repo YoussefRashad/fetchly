@@ -45,8 +45,11 @@ export function statusText(job: Job): string {
       if (!job.resumable) parts.push('cannot resume');
       return parts.filter((p) => p !== '').join(' · ');
     }
-    case 'paused':
-      return pct === null ? 'paused' : `paused ${pct}%`;
+    case 'paused': {
+      const text = pct === null ? 'paused' : `paused ${pct}%`;
+      // A cut-off job cannot resume until its old processes are known to be gone.
+      return job.interrupted ? `${text} · waiting for a check` : text;
+    }
     case 'merging':
       return 'finishing…';
     case 'done':
@@ -85,7 +88,8 @@ export function allowedVerbs(job: Job): JobVerb[] {
     case 'merging':
       return ['cancel'];
     case 'paused':
-      return ['resume', 'cancel'];
+      // A cut-off job is refused resume until the check succeeds or is confirmed.
+      return job.interrupted ? ['cancel'] : ['resume', 'cancel'];
     case 'failed':
       return ['retry', 'remove'];
     case 'skipped':

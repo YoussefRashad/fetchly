@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { ProbeResult, Settings, Snapshot } from '../../shared/types';
+import type { AppStatus, ProbeResult, Settings, Snapshot } from '../../shared/types';
+import { banners, type BannerAction } from './banners';
 import { AddDialog } from './components/AddDialog';
 import { InstallScreen } from './components/InstallScreen';
 import { JobList } from './components/JobList';
@@ -10,34 +11,53 @@ import { S } from './strings';
 
 const FILTERS: Filter[] = ['all', 'downloading', 'paused', 'done', 'failed'];
 
+const ACTION_LABELS: Record<BannerAction, string> = { retryEngines: S.retry, confirmStraysGone: S.theyAreGone };
+
 export function App() {
   const [snapshot, setSnapshot] = useState<Snapshot>({ jobs: [], groups: [] });
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [toolsReady, setToolsReady] = useState<boolean | null>(null);
+  const [status, setStatus] = useState<AppStatus | null>(null);
   const [filter, setFilter] = useState<Filter>('all');
   const [adding, setAdding] = useState<{ url: string; probe: ProbeResult } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [pending, setPending] = useState<BannerAction | null>(null);
 
   const refresh = useCallback(async () => {
     setSnapshot(await window.hammel.snapshot());
   }, []);
 
   useEffect(() => {
-    const stop = window.hammel.onChanged(setSnapshot);
+    const stopChanged = window.hammel.onChanged(setSnapshot);
+    // Subscribe first, then ask: the status is state, so whichever answer arrives last is current.
+    const stopStatus = window.hammel.onStatus(setStatus);
+    void window.hammel.status().then(setStatus);
     void refresh();
     void window.hammel.getSettings().then(setSettings);
-    void window.hammel.binaries().then((bins) => setToolsReady(bins.every((b) => b.installed)));
     void window.hammel.startupNotice().then((n) => n && setMessage(n));
-    return stop;
+    return () => {
+      stopChanged();
+      stopStatus();
+    };
   }, [refresh]);
 
-  if (toolsReady === null || settings === null) return null;
-  if (!toolsReady) {
+  async function runBannerAction(action: BannerAction) {
+    if (action === 'confirmStraysGone' && !window.confirm(S.confirmStraysGone)) return;
+    setPending(action);
+    try {
+      const res = await window.hammel[action]();
+      if (!res.ok) setMessage(res.error);
+    } finally {
+      setPending(null);
+    }
+  }
+
+  if (status === null || settings === null) return null;
+  if (status.engine.state === 'notInstalled') {
     return (
       <InstallScreen
         onInstalled={() => {
-          setToolsReady(true);
+          void window.hammel.status().then(setStatus);
           void refresh();
         }}
       />
@@ -58,6 +78,17 @@ export function App() {
         ))}
         <span className="speed">{formatSpeed(totalSpeed)}</span>
       </nav>
+
+      {banners(status, snapshot).map(({ id, text, action }) => (
+        <p key={id} className={`banner persistent banner-${id}`} role="alert">
+          <span>{text}</span>
+          {action !== null && (
+            <button type="button" disabled={pending !== null} onClick={() => void runBannerAction(action)}>
+              {ACTION_LABELS[action]}
+            </button>
+          )}
+        </p>
+      ))}
 
       {message && (
         <p className="banner" role="status">

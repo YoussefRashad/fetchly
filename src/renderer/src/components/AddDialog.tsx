@@ -115,7 +115,7 @@ export function AddDialog({ url, probe, settings, onClose }: Props) {
                     />
                     <span className="num">{entry.index}</span>
                     <span dir="auto">{entry.title}</span>
-                    {entry.unavailable && <em>{S.unavailable}</em>}
+                    {entry.unavailable && <em>{S.entryReasons[entry.reason ?? 'unavailable']}</em>}
                   </label>
                 </li>
               ))}

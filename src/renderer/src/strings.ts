@@ -1,7 +1,7 @@
-import type { GroupVerb, JobVerb } from '../../shared/types';
+import type { EntryReason, GroupVerb, JobVerb } from '../../shared/types';
 import type { Filter } from './format';
 
-/** Every piece of text the window shows, in one place so it can be translated later. */
+/** Text of the window's own controls and dialogs. Status words, reasons from the main process, tray text and notifications are not collected here yet. */
 export const S = {
   appName: 'Hammel',
   urlPlaceholder: 'Paste a video, playlist or file link',
@@ -40,7 +40,7 @@ export const S = {
   selectAll: 'Select all',
   selectNone: 'Select none',
   selected: (n: number, m: number) => `${n} of ${m} selected`,
-  unavailable: 'unavailable',
+  entryReasons: { private: 'private', removed: 'removed', unavailable: 'unavailable' } satisfies Record<EntryReason, string>,
   download: 'Download',
   close: 'Close',
   fileSize: 'Size',
@@ -51,7 +51,7 @@ export const S = {
   askEveryTime: 'Ask where to save every time',
   maxConcurrent: 'Downloads at the same time',
   speedLimit: 'Speed limit (KB/s, 0 = no limit)',
-  speedLimitHint: 'A video that is already downloading takes a new limit when it is next started.',
+  speedLimitHint: 'Changing the limit restarts videos that are downloading; they continue from where they were.',
   autoResume: 'Continue paused downloads when the app starts',
   preferMp4: 'Always save video as mp4 (limits quality to 1080p)',
   defaultQuality: 'Default quality',
@@ -74,4 +74,10 @@ export const S = {
   install: 'Install',
   installing: 'Installing…',
   retryInstall: 'Try again',
+
+  cutOffBanner:
+    'Some downloads were cut off and Hammel could not check that their old processes are gone. End yt-dlp, ffmpeg and aria2c in Task Manager, then confirm.',
+  retry: 'Retry',
+  theyAreGone: 'They are gone',
+  confirmStraysGone: 'Are yt-dlp, ffmpeg and aria2c no longer listed in Task Manager? The cut-off downloads can then be resumed.',
 };

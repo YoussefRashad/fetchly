@@ -98,6 +98,21 @@ describe('statusText', () => {
   ])('%#', (job, text) => {
     expect(statusText(job)).toBe(text);
   });
+
+  it('says a cut-off job waits for a check', () => {
+    expect(statusText(makeJob({ state: 'paused', interrupted: true, bytesDone: 80, bytesTotal: 200 }))).toBe('paused 40% · waiting for a check');
+    expect(statusText(makeJob({ state: 'paused', interrupted: true, bytesDone: 80, bytesTotal: null }))).toBe('paused · waiting for a check');
+  });
+
+  it('says nothing about a check for a paused job that was not cut off', () => {
+    expect(statusText(makeJob({ state: 'paused', interrupted: false, bytesDone: 80, bytesTotal: 200 }))).toBe('paused 40%');
+    expect(statusText(makeJob({ state: 'paused', interrupted: false }))).toBe('paused');
+  });
+
+  it('only a paused job shows the check (interrupted on another state changes nothing)', () => {
+    expect(statusText(makeJob({ state: 'queued', interrupted: true }))).toBe('queued');
+    expect(statusText(makeJob({ state: 'downloading', interrupted: true, bytesDone: 50, bytesTotal: 200 }))).toBe('25%');
+  });
 });
 
 describe('matchesFilter', () => {
@@ -129,6 +144,18 @@ describe('allowedVerbs', () => {
 
   it.each(cases)('%s -> %j', (state, verbs) => {
     expect(allowedVerbs(makeJob({ state }))).toEqual(verbs);
+  });
+
+  it('a cut-off job offers only Cancel', () => {
+    expect(allowedVerbs(makeJob({ state: 'paused', interrupted: true }))).toEqual(['cancel']);
+  });
+
+  it('a paused job that was not cut off can resume', () => {
+    expect(allowedVerbs(makeJob({ state: 'paused', interrupted: false }))).toEqual(['resume', 'cancel']);
+  });
+
+  it.each(cases.filter(([state]) => state !== 'paused'))('interrupted on %s changes nothing -> %j', (state, verbs) => {
+    expect(allowedVerbs(makeJob({ state, interrupted: true }))).toEqual(verbs);
   });
 });
 
