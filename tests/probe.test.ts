@@ -121,6 +121,20 @@ describe('probeUrl', () => {
     expect(result.kind === 'file' && result.fileName).toBe('evil.exe');
   });
 
+  it('caps a server-chosen name at 150 characters with a 16-character extension', async () => {
+    const long = `${'s'.repeat(150)}.${'e'.repeat(150)}`;
+    const headers = { 'content-range': 'bytes 0-0/9', 'content-disposition': `attachment; filename="${long}"` };
+    const result = await probe('probe-unsupported', stubFetch(206, headers));
+    const name = result.kind === 'file' ? result.fileName : '';
+    expect(name.length).toBeLessThanOrEqual(150);
+    expect(name.split('.').pop()).toBe('e'.repeat(16));
+  });
+
+  it('makes a device name safe', async () => {
+    const headers = { 'content-range': 'bytes 0-0/9', 'content-disposition': 'attachment; filename="CON"' };
+    expect(await probe('probe-unsupported', stubFetch(206, headers))).toMatchObject({ fileName: '_CON' });
+  });
+
   it('falls back to "download" when the link has no file name', async () => {
     process.env['FAKE_YTDLP'] = 'probe-unsupported';
     const result = await probeUrl('https://example.com/', FAKE, stubFetch(206, { 'content-range': 'bytes 0-0/9' }));

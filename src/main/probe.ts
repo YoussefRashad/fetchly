@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import type { ProbeResult } from '../shared/types';
 import type { Exe } from './engines/media';
-import { sanitizeName } from './naming';
+import { sanitizeFileName } from './naming';
 import { probeArgs } from './ytdlp/args';
 import { classifyError, parseProbe } from './ytdlp/parse';
 
@@ -88,13 +88,8 @@ function fileNameFrom(disposition: string | null, url: string): string {
       name = null;
     }
   }
-  if (!name) return 'download';
-  // A server-chosen name must never carry a path.
-  const leaf = name.split(/[\\/]/u).pop() ?? '';
-  const dot = leaf.lastIndexOf('.');
-  if (dot <= 0) return sanitizeName(leaf) === 'untitled' ? 'download' : sanitizeName(leaf);
-  const ext = sanitizeName(leaf.slice(dot + 1)).replace(/\s+/gu, '');
-  return `${sanitizeName(leaf.slice(0, dot))}.${ext}`;
+  // A server-chosen name must never carry a path; sanitizeFileName keeps the leaf only.
+  return sanitizeFileName(name ?? '');
 }
 
 async function probeFile(url: string, fetchImpl: typeof fetch): Promise<ProbeResult> {

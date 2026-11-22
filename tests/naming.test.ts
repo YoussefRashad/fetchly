@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { itemBaseName, sanitizeName, uniqueName } from '../src/main/naming';
+import { dirKey, freeName, itemBaseName, nameConflicts, sanitizeFileName, sanitizeName } from '../src/main/naming';
 
 describe('sanitizeName', () => {
   it('replaces characters Windows forbids', () => {
@@ -71,16 +71,114 @@ describe('itemBaseName', () => {
   });
 });
 
-describe('uniqueName', () => {
+describe('sanitizeFileName', () => {
+  const long = `${'x'.repeat(150)}.${'y'.repeat(150)}`;
+  it.each([
+    ['CON', '_CON'],
+    ['com1.txt', '_com1.txt'],
+    ['report.txt:payload', 'report.txtpayload'],
+    ['a.', 'a'],
+    ['a..pdf', 'a.pdf'],
+    ['..\\..\\evil.exe', 'evil.exe'],
+    ['../x/evil.exe', 'evil.exe'],
+    ['re:port?.pdf', 're port.pdf'],
+    ['.', 'download'],
+    ['', 'download'],
+    ['???.pdf', 'download.pdf'],
+    ['ملف الدرس.pdf', 'ملف الدرس.pdf'],
+    ['My File.zip', 'My File.zip'],
+    ['.bashrc', '.bashrc'],
+    ['x.yyyyyyyyyyyyyyyyyyyyyyyy.', 'x.yyyyyyyyyyyyyyyy'],
+  ])('%j becomes %j', (raw, safe) => {
+    expect(sanitizeFileName(raw)).toBe(safe);
+  });
+
+  it('keeps the whole name within 150 characters and the extension within 16', () => {
+    const name = sanitizeFileName(long);
+    expect(name).toBe(`${'x'.repeat(133)}.${'y'.repeat(16)}`);
+  });
+
+  it('never ends a name with a dot or a space', () => {
+    expect(sanitizeFileName(`${'a'.repeat(140)} . .pdf`)).toBe(`${'a'.repeat(140)}.pdf`);
+  });
+
+  it.each([
+    'CON',
+    'com1.txt',
+    'report.txt:payload',
+    'a.',
+    long,
+    `x.${'y'.repeat(100)}.`,
+    `${'a'.repeat(148)}.b c.d`,
+    'con.part1',
+    '.bashrc',
+    '😀'.repeat(100),
+  ])('is idempotent for %j', (raw) => {
+    const once = sanitizeFileName(raw);
+    expect(sanitizeFileName(once)).toBe(once);
+    expect(once.isWellFormed()).toBe(true);
+  });
+});
+
+describe('nameConflicts', () => {
+  it.each([
+    ['Clip', ['clip'], true],
+    ['Clip.f137', ['Clip'], true],
+    ['Clip', ['Clip.extra'], true],
+    ['Clip', ['Clip.mp4'], true],
+    ['Clip 2', ['Clip'], false],
+    ['a.zip', ['a.pdf'], false],
+    ['Clipper', ['Clip'], false],
+  ] as const)('%j against the jobs %j: %s', (candidate, claims, conflict) => {
+    expect(nameConflicts(candidate, claims, [])).toBe(conflict);
+  });
+
+  it.each([
+    ['Talk', ['Talk.mp4'], true],
+    ['Talk', ['talk.MKV'], true],
+    ['a.zip', ['a.zip.aria2'], true],
+    ['a.zip', ['A.ZIP'], true],
+    ['a.zip', ['a'], false],
+    ['Talk', ['Talk 2.mp4'], false],
+  ] as const)('%j against the files %j: %s', (candidate, disk, conflict) => {
+    expect(nameConflicts(candidate, [], disk)).toBe(conflict);
+  });
+});
+
+describe('freeName', () => {
+  const among = (taken: string[]) => (name: string) => taken.some((t) => t.toLowerCase() === name.toLowerCase());
+
   it('uses the plain name when it is free', () => {
-    expect(uniqueName('a', 'mp4', new Set())).toBe('a.mp4');
+    expect(freeName('a', 'mp4', among([]))).toBe('a.mp4');
   });
 
   it('counts up past taken names, ignoring case', () => {
-    expect(uniqueName('a', 'mp4', new Set(['A.mp4', 'a (2).mp4']))).toBe('a (3).mp4');
+    expect(freeName('a', 'mp4', among(['A.mp4', 'a (2).mp4']))).toBe('a (3).mp4');
   });
 
   it('handles a name without an extension', () => {
-    expect(uniqueName('download', '', new Set(['download']))).toBe('download (2)');
+    expect(freeName('download', '', among(['download']))).toBe('download (2)');
+  });
+
+  it('numbers before the first dot when the whole name extends another job', () => {
+    expect(freeName('Clip.f137', '', (n) => nameConflicts(n, ['Clip'], []))).toBe('Clip (2).f137');
+  });
+
+  it('numbers before the first dot for a file whose name extends another job', () => {
+    expect(freeName('a.tar', 'gz', (n) => nameConflicts(n, ['a'], []))).toBe('a (2).tar.gz');
+  });
+
+  it('keeps counting when the first numbers are taken', () => {
+    const taken = (n: string) => nameConflicts(n, ['Clip', 'Clip (2)', 'Clip (3)'], []);
+    expect(freeName('Clip.f137', '', taken)).toBe('Clip (4).f137');
+  });
+});
+
+describe('dirKey', () => {
+  it('treats spellings of one folder as the same', () => {
+    const key = dirKey('D:\\Dl\\');
+    expect(dirKey('d:/dl')).toBe(key);
+    expect(dirKey('D:\\Dl\\x\\..')).toBe(key);
+    expect(dirKey('D:\\Dl\\x')).not.toBe(key);
   });
 });
