@@ -54,6 +54,9 @@ Start from a clean profile for check 1: quit Fetchly from the tray and delete
 | 42 | Make a tool install fail while extracting from the archive with an error other than disk full or a refused folder. | Note the message shown; it is passed through as is. |
 | 43 | Cut the connection while the yt-dlp checksum list is being read. | Note the message shown. |
 | 44 | Add a playlist where an entry url from yt-dlp starts or ends with a non-ASCII space, then restart the app. | The list loads; it is not set aside as `jobs.json.corrupt-<time>`. |
+| 45 | Download a direct file, then open its Properties in Explorer. Also run `Get-Content <file> -Stream Zone.Identifier` in PowerShell. | Properties shows "This file came from another computer" with an **Unblock** box; the stream holds `ZoneId=3` and the link. |
+| 46 | Download a small signed installer (`.exe`) and a `.url` shortcut file, then press Open on each. | Fetchly asks first, with Cancel as the default. Cancel opens nothing. Open on the `.exe` shows the Windows security prompt for a downloaded program. |
+| 47 | Add a direct link to a `.torrent` file (a Linux distribution's torrent works). | The `.torrent` file itself is saved and the job is `done`; nothing is downloaded over BitTorrent and no aria2 port stays open for peers. |
 
 ## Known limits in phase 1
 

@@ -21,6 +21,8 @@ export interface QueueLifecycleDeps {
   attachTray: (queue: Queue) => void;
   /** Every save state of a wired queue: the text of the last failed save, or null. */
   onSaveState: (error: string | null) => void;
+  /** Marks each finished download as coming from the internet (QueueDeps.markDownloaded). */
+  markDownloaded?: (path: string, url: string) => void;
 }
 
 /** The queue steps EngineHost runs (F2): construct, wire, dispose; plus an aria2 restart. */
@@ -46,7 +48,15 @@ export function createQueueLifecycle(deps: QueueLifecycleDeps): QueueLifecycle {
   return {
     createQueue: (daemon, straysCleared) => {
       const { media, file } = deps.engines(daemon);
-      const queue = new Queue({ store: deps.store, media, file, initial, settings: deps.settings(), straysCleared });
+      const queue = new Queue({
+        store: deps.store,
+        media,
+        file,
+        initial,
+        settings: deps.settings(),
+        straysCleared,
+        ...(deps.markDownloaded ? { markDownloaded: deps.markDownloaded } : {}),
+      });
       fileOf.set(queue, file);
       return queue;
     },

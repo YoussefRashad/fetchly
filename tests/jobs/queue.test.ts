@@ -69,7 +69,12 @@ let finished: { kind: 'job' | 'group'; title: string; failed: number; skipped: n
 let changes: number;
 
 /** A queue on the fake engines and store, with no listener registered. */
-function buildBare(settings: Partial<Settings> = {}, initial: Snapshot = { jobs: [], groups: [] }, straysCleared = true): Queue {
+function buildBare(
+  settings: Partial<Settings> = {},
+  initial: Snapshot = { jobs: [], groups: [] },
+  straysCleared = true,
+  extra: Pick<ConstructorParameters<typeof Queue>[0], 'markDownloaded'> = {},
+): Queue {
   const store = {
     saveSnapshot: (s: Snapshot) => {
       log.push('save');
@@ -86,6 +91,7 @@ function buildBare(settings: Partial<Settings> = {}, initial: Snapshot = { jobs:
     straysCleared,
     now: () => clock,
     setTimer: (fn, ms) => timers.push({ fn, ms }),
+    ...extra,
   });
 }
 
@@ -359,6 +365,55 @@ describe('scheduling', () => {
     expect(jobAt(q, 0).state).toBe('merging');
     media.emit(done(id, 'Talk.mp4'));
     expect(jobAt(q, 0)).toMatchObject({ state: 'done', fileName: 'Talk.mp4', actualHeight: 720 });
+  });
+
+  describe('marking finished downloads as from the internet', () => {
+    it('marks the finished file with its full path and link, before the window hears it is done', () => {
+      const marks: [string, string, string][] = [];
+      let queue: Queue | null = null;
+      const q = buildBare({}, undefined, true, {
+        markDownloaded: (path, url) => void marks.push([path, url, queue?.snapshot().jobs[0]?.state ?? 'none']),
+      });
+      queue = q;
+      q.add(fileReq('setup.exe'));
+      const id = jobAt(q, 0).id;
+      file.emit(progress(id));
+      file.emit(done(id, 'setup.exe'));
+      // The job was still listed as downloading while the mark was written.
+      expect(marks).toEqual([[join(dir, 'setup.exe'), 'https://example.com/a.zip', 'downloading']]);
+      expect(jobAt(q, 0).state).toBe('done');
+    });
+
+    it('marks a finished video in its playlist folder', () => {
+      const marks: string[] = [];
+      const q = buildBare({ maxConcurrent: 1 }, undefined, true, { markDownloaded: (path) => void marks.push(path) });
+      q.add(playlist(1));
+      const job = jobAt(q, 0);
+      media.emit(done(job.id, '01 - Part 1.mp4'));
+      expect(marks).toEqual([join(job.dir, '01 - Part 1.mp4')]);
+    });
+
+    it('still finishes the download when the mark cannot be written', () => {
+      const q = buildBare({}, undefined, true, {
+        markDownloaded: () => {
+          throw new Error('EINVAL');
+        },
+      });
+      q.add(video());
+      media.emit(done(jobAt(q, 0).id, 'Talk.mp4'));
+      expect(jobAt(q, 0)).toMatchObject({ state: 'done', fileName: 'Talk.mp4' });
+    });
+
+    it('marks nothing for a download that failed or finished without a usable file', () => {
+      const marks: string[] = [];
+      const q = buildBare({}, undefined, true, { markDownloaded: (path) => void marks.push(path) });
+      q.add(video('One'));
+      q.add(video('Two'));
+      media.emit(error(jobAt(q, 0).id, 'gone', false));
+      media.emit({ jobId: jobAt(q, 1).id, type: 'done', fileName: ' . ', actualHeight: null });
+      expect(states(q)).toEqual(['failed', 'failed']);
+      expect(marks).toEqual([]);
+    });
   });
 
   it('splits the speed limit between the slots, the same share for a video and a file', () => {

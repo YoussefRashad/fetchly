@@ -398,3 +398,48 @@ describe('queueLifecycle with a real Queue and Store (F2)', () => {
     expect(starts()).toEqual(['start:v1']);
   });
 });
+
+describe('marking finished downloads', () => {
+  /** An engine whose listener the spec can call. */
+  class EmittingEngine extends FakeEngine {
+    listener: Parameters<Engine['on']>[0] = () => undefined;
+    // The base fake takes no listener; a rest parameter keeps this override assignable to it.
+    override on(...args: unknown[]): void {
+      this.listener = args[0] as Parameters<Engine['on']>[0];
+    }
+  }
+
+  function lifecycle(markDownloaded?: (path: string, url: string) => void): { life: QueueLifecycle; media: EmittingEngine } {
+    const store = new Store(dataDir, downloads);
+    store.saveSnapshot({ jobs: [queuedJob()], groups: [] });
+    const media = new EmittingEngine();
+    const life = createQueueLifecycle({
+      store,
+      initial: store.load().snapshot,
+      settings: () => makeSettings({ downloadDir: downloads }),
+      engines: () => ({ media, file: new FakeEngine() }),
+      send: () => undefined,
+      attachTray: () => undefined,
+      onSaveState: () => undefined,
+      ...(markDownloaded ? { markDownloaded } : {}),
+    });
+    return { life, media };
+  }
+
+  it('hands markDownloaded to every queue it builds', () => {
+    const marks: [string, string][] = [];
+    const { life, media } = lifecycle((path, url) => void marks.push([path, url]));
+    const queue = life.createQueue(fakeDaemon(), true);
+    expect(calls).toEqual(['start:v1']);
+    media.listener({ jobId: 'v1', type: 'done', fileName: 'v1.mp4', actualHeight: null });
+    expect(queue.snapshot().jobs[0]?.state).toBe('done');
+    expect(marks).toEqual([[join(downloads, 'v1.mp4'), queuedJob().url]]);
+  });
+
+  it('builds queues that mark nothing when none is given', () => {
+    const { life, media } = lifecycle();
+    const queue = life.createQueue(fakeDaemon(), true);
+    media.listener({ jobId: 'v1', type: 'done', fileName: 'v1.mp4', actualHeight: null });
+    expect(queue.snapshot().jobs[0]?.state).toBe('done');
+  });
+});

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EngineEvent, StartContext } from '../../src/main/engines/engine';
 import {
+  aria2DaemonArgs,
   Aria2RpcError,
   Aria2TransportError,
   createRpcClient,
@@ -1542,5 +1543,29 @@ describe('FakeAria2 (test support)', () => {
     fake.transportDown = true;
     release();
     expect(await held).toBeInstanceOf(Aria2TransportError);
+  });
+});
+
+describe('aria2 daemon command line', () => {
+  const args = aria2DaemonArgs(6800, 'abc');
+
+  it.each([
+    '--follow-torrent=false',
+    '--follow-metalink=false',
+    '--enable-dht=false',
+    '--enable-dht6=false',
+    '--bt-enable-lpd=false',
+    '--enable-peer-exchange=false',
+    '--seed-time=0',
+  ])('does plain HTTP only: %s', (flag) => {
+    expect(args).toContain(flag);
+  });
+
+  it('never turns torrent, metalink or peer-to-peer back on', () => {
+    expect(args.filter((a) => /^--(follow-torrent|follow-metalink|enable-dht6?|bt-enable-lpd|enable-peer-exchange)=(?!false$)/u.test(a))).toEqual([]);
+  });
+
+  it('keeps RPC on this machine with the per-run secret', () => {
+    expect(args).toEqual(expect.arrayContaining(['--enable-rpc', '--rpc-listen-all=false', '--rpc-listen-port=6800', '--rpc-secret=abc']));
   });
 });

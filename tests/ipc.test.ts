@@ -20,6 +20,9 @@ let settings: Settings;
 let savedSettings: Settings[];
 let queueSettings: Settings[];
 let opened: string[];
+/** The file names the user was asked about before opening, and the answer the fake gives. */
+let askedToOpen: string[];
+let openAnswer: boolean;
 let shown: string[];
 let probeImpl: (url: string) => Promise<ProbeResult>;
 let probed: string[];
@@ -100,6 +103,10 @@ function deps(): HandlerDeps {
     },
     pickFolder: async () => 'D:\\Picked',
     openPath: async (p) => void opened.push(p),
+    confirmOpenRunnable: async (name) => {
+      askedToOpen.push(name);
+      return openAnswer;
+    },
     showItem: (p) => void shown.push(p),
     startupNotice: () => 'jobs.json.corrupt-1',
   };
@@ -124,6 +131,8 @@ beforeEach(() => {
   savedSettings = [];
   queueSettings = [];
   opened = [];
+  askedToOpen = [];
+  openAnswer = false;
   shown = [];
   probeImpl = async () => media;
   probed = [];
@@ -862,6 +871,53 @@ describe('opening files', () => {
     snapshot = { jobs: [doneJob()], groups: [] };
     expect(await createHandlers(deps()).openFile('j1')).toEqual({ ok: true, value: null });
     expect(opened).toEqual([join(dir, 'Talk.mp4')]);
+    expect(askedToOpen).toEqual([]);
+  });
+
+  describe('a file that can run a program', () => {
+    const runnable = (fileName: string) => {
+      writeFileSync(join(dir, fileName), 'x');
+      snapshot = { jobs: [makeJob({ id: 'j1', state: 'done', dir, fileName })], groups: [] };
+    };
+
+    it.each(['setup.exe', 'Invoice.pdf.lnk', 'site.url', 'run.HTA', 'disk.iso', 'tool.exe.'])('asks before opening %s, and opens nothing on Cancel', async (name) => {
+      runnable(name);
+      openAnswer = false;
+      expect(await createHandlers(deps()).openFile('j1')).toEqual({ ok: true, value: null });
+      expect(askedToOpen).toEqual([name]);
+      expect(opened).toEqual([]);
+    });
+
+    it('opens it once the user says Open', async () => {
+      runnable('setup.exe');
+      openAnswer = true;
+      expect(await createHandlers(deps()).openFile('j1')).toEqual({ ok: true, value: null });
+      expect(askedToOpen).toEqual(['setup.exe']);
+      expect(opened).toEqual([join(dir, 'setup.exe')]);
+    });
+
+    it('does not ask about a file that is gone', async () => {
+      snapshot = { jobs: [makeJob({ id: 'j1', state: 'done', dir, fileName: 'setup.exe' })], groups: [] };
+      expect(await createHandlers(deps()).openFile('j1')).toEqual({ ok: false, error: 'The file is no longer there' });
+      expect(askedToOpen).toEqual([]);
+    });
+
+    it('turns a failing question into an error, opening nothing', async () => {
+      runnable('setup.exe');
+      const d = deps();
+      d.confirmOpenRunnable = async () => {
+        throw new Error('no window');
+      };
+      expect(await createHandlers(d).openFile('j1')).toEqual({ ok: false, error: 'Something went wrong: no window' });
+      expect(opened).toEqual([]);
+    });
+
+    it('never asks before showing it in its folder', async () => {
+      runnable('setup.exe');
+      await createHandlers(deps()).openFolder('j1');
+      expect(shown).toEqual([join(dir, 'setup.exe')]);
+      expect(askedToOpen).toEqual([]);
+    });
   });
 
   it('says so when the file is gone', async () => {

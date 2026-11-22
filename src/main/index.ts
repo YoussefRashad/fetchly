@@ -5,6 +5,7 @@ import { Binaries } from './binaries';
 import { EngineHost } from './engineHost';
 import { FileEngine, startAria2 } from './engines/file';
 import { MediaEngine } from './engines/media';
+import { markFromInternet } from './fileSafety';
 import { createHandlers, type Handlers } from './ipc';
 import type { Queue } from './jobs/queue';
 import { Store } from './jobs/store';
@@ -101,6 +102,7 @@ async function main(): Promise<void> {
       saveError = error;
       pushStatus();
     },
+    markDownloaded: (path, url) => void markFromInternet(path, url),
   });
 
   const engines = new EngineHost<Queue>({
@@ -138,6 +140,20 @@ async function main(): Promise<void> {
     openPath: async (path) => {
       const error = await shell.openPath(path);
       if (error !== '') throw new Error(error);
+    },
+    confirmOpenRunnable: async (fileName) => {
+      if (!win) return false;
+      const answer = await dialog.showMessageBox(win, {
+        type: 'warning',
+        title: 'Open a file that can run a program?',
+        message: `"${fileName}" can run a program or change this PC when it is opened.`,
+        detail: 'Open it only if you trust the site it came from.',
+        buttons: ['Open', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      });
+      return answer.response === 0;
     },
     showItem: (path) => shell.showItemInFolder(path),
     startupNotice: () => {

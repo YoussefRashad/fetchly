@@ -16,6 +16,7 @@ import {
   type Settings,
   type Snapshot,
 } from '../shared/types';
+import { isRunnableFile } from './fileSafety';
 import { normalizeSettings } from './jobs/store';
 import { copyQuality, everyPosition, isAbsoluteDir, isLangList, isQuality } from './jobs/validate';
 import { sanitizeFileName } from './naming';
@@ -54,6 +55,8 @@ export interface HandlerDeps {
   afterInstall(): Promise<void>;
   pickFolder(): Promise<string | null>;
   openPath(path: string): Promise<void>;
+  /** Asks the user before a downloaded file that can run a program is opened; true = open it. */
+  confirmOpenRunnable(fileName: string): Promise<boolean>;
   showItem(path: string): void;
   startupNotice(): string | null;
 }
@@ -290,6 +293,8 @@ export function createHandlers(deps: HandlerDeps) {
         if (!job || job.state !== 'done' || job.fileName === null) return fail('This download is not finished');
         const path = join(job.dir, job.fileName);
         if (!existsSync(path)) return fail('The file is no longer there');
+        // A program, shortcut, script or disk image runs only after the user says yes.
+        if (isRunnableFile(job.fileName) && !(await deps.confirmOpenRunnable(job.fileName))) return ok(null);
         await deps.openPath(path);
         return ok(null);
       }),

@@ -62,11 +62,16 @@ and lists such items as `skipped: protected`.
 - **Verified tool installs** (`src/main/binaries.ts`): archives are checked
   against published SHA-256 sums (aria2 against a pinned one) before
   anything is extracted, and installs are serialized.
+- **Safe with what it downloads** (`src/main/fileSafety.ts`): every finished
+  file carries the Windows Mark-of-the-Web (`Zone.Identifier`, zone 3), so
+  SmartScreen and Office Protected View still apply; opening a program,
+  shortcut, script or disk image asks first; and aria2 is limited to plain
+  HTTP(S), so a link to a `.torrent` or metalink is saved, never followed.
 - **Locked-down renderer.** The window runs sandboxed with context isolation
   and no Node integration. It only sees the typed `window.fetchly` bridge
   (`src/preload`), and every argument that crosses IPC is validated in the
   main process (`src/main/ipc.ts`).
-- **Tested without the network.** Over 2,500 Vitest tests run in about 15
+- **Tested without the network.** Over 2,600 Vitest tests run in about 15
   seconds, using a scripted stand-in for yt-dlp and an in-process aria2
   JSON-RPC stand-in. What only real sites can prove is in a
   [manual checklist](docs/manual-checklist-phase1.md).
@@ -170,6 +175,7 @@ src/main/engines/        yt-dlp and aria2 supervision
 src/main/ytdlp/          argument building and output parsing
 src/main/engineHost.ts   aria2 daemon start, retry and restart
 src/main/binaries.ts     fetch and verify the tools
+src/main/fileSafety.ts   Mark-of-the-Web and runnable-file checks
 src/main/ipc.ts          what the window may ask for
 src/preload/             the bridge exposed as window.fetchly
 src/renderer/            the window (React)

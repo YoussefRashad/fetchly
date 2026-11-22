@@ -67,6 +67,11 @@ export interface QueueDeps {
   settings: Settings;
   /** true = the check for tool processes left by an earlier run succeeded, so no job is cut off. */
   straysCleared: boolean;
+  /**
+   * Called with the full path and the link of each download that finished, before it is listed as
+   * done: marks the file as coming from the internet. Best effort; anything it throws is ignored.
+   */
+  markDownloaded?: (path: string, url: string) => void;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
 }
@@ -86,6 +91,7 @@ export class Queue {
   private readonly store: Store;
   private readonly media: Engine;
   private readonly file: QueueDeps['file'];
+  private readonly markDownloaded: (path: string, url: string) => void;
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
 
@@ -117,6 +123,7 @@ export class Queue {
     this.store = deps.store;
     this.media = deps.media;
     this.file = deps.file;
+    this.markDownloaded = deps.markDownloaded ?? (() => undefined);
     this.jobs = [...deps.initial.jobs];
     if (deps.straysCleared) this.jobs = this.jobs.map((j) => (j.interrupted ? { ...j, interrupted: false } : j));
     this.groups = [...deps.initial.groups];
@@ -493,6 +500,12 @@ export class Queue {
         }
         const height = (count(ev.actualHeight) ?? 0) > 0 ? ev.actualHeight : null;
         const next = transition(job, { type: 'done', fileName: ev.fileName, actualHeight: height });
+        // Marked before the window can list it as done, so it is never opened unmarked.
+        try {
+          this.markDownloaded(join(job.dir, ev.fileName), job.url);
+        } catch {
+          // best effort: a drive that cannot hold the mark never fails the download
+        }
         this.replace({ ...next, bytesDone: next.bytesTotal ?? next.bytesDone });
         this.commit();
         this.announce(job);

@@ -445,30 +445,46 @@ function freePort(): Promise<number> {
   });
 }
 
+/**
+ * aria2 does plain HTTP(S) downloads only: a link that answers with a .torrent or a metalink is
+ * saved as that file, never followed, so no peer-to-peer traffic, listening port or seeding.
+ */
+export const ARIA2_PLAIN_HTTP_ARGS: readonly string[] = [
+  '--follow-torrent=false',
+  '--follow-metalink=false',
+  '--enable-dht=false',
+  '--enable-dht6=false',
+  '--bt-enable-lpd=false',
+  '--enable-peer-exchange=false',
+  '--seed-time=0',
+];
+
+/** The aria2 daemon command line: RPC on this machine only, with a per-run secret. */
+export function aria2DaemonArgs(port: number, secret: string): string[] {
+  return [
+    '--enable-rpc',
+    '--rpc-listen-all=false',
+    `--rpc-listen-port=${port}`,
+    `--rpc-secret=${secret}`,
+    ...ARIA2_PLAIN_HTTP_ARGS,
+    '--continue=true',
+    '--max-connection-per-server=8',
+    '--split=8',
+    '--min-split-size=1M',
+    '--auto-file-renaming=false',
+    '--allow-overwrite=false',
+    '--max-tries=3',
+    '--retry-wait=5',
+    '--quiet=true',
+  ];
+}
+
 /** Starts the aria2 daemon, reachable only from this machine and only with a per-run secret. */
 export async function startAria2(exePath: string, dataDir: string): Promise<Aria2Daemon> {
   mkdirSync(dataDir, { recursive: true });
   const port = await freePort();
   const secret = randomBytes(16).toString('hex');
-  const child = spawn(
-    exePath,
-    [
-      '--enable-rpc',
-      '--rpc-listen-all=false',
-      `--rpc-listen-port=${port}`,
-      `--rpc-secret=${secret}`,
-      '--continue=true',
-      '--max-connection-per-server=8',
-      '--split=8',
-      '--min-split-size=1M',
-      '--auto-file-renaming=false',
-      '--allow-overwrite=false',
-      '--max-tries=3',
-      '--retry-wait=5',
-      '--quiet=true',
-    ],
-    { windowsHide: true, stdio: 'ignore', cwd: dataDir },
-  );
+  const child = spawn(exePath, aria2DaemonArgs(port, secret), { windowsHide: true, stdio: 'ignore', cwd: dataDir });
   let spawnError: Error | null = null;
   child.on('error', (e) => (spawnError = e));
 
