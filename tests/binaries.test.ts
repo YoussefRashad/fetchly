@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } fro
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { Binaries, ChecksumMismatch, SOURCES } from '../src/main/binaries';
+import { ARIA2_ZIP_SHA256, Binaries, ChecksumMismatch, SOURCES } from '../src/main/binaries';
 import type { BinName } from '../src/shared/types';
 import { makeZip } from './zip';
 
@@ -62,6 +62,18 @@ beforeEach(() => {
 });
 
 describe('Binaries', () => {
+  it('ships with the aria2 archive checksum pinned', () => {
+    // Cross-checked on 2026-11-22: the release asset, the Scoop manifest and the winget manifest all give this value.
+    expect(ARIA2_ZIP_SHA256).toBe('67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288');
+  });
+
+  it('checks aria2 against the built-in pin and rejects any other archive', async () => {
+    const bins = new Binaries(binDir, { fetchImpl: fetchStub, versionOf: async () => '1' });
+    // The stub serves a different archive than the real one, so the built-in pin must reject it.
+    await expect(bins.ensureAll(() => undefined)).rejects.toThrow(ChecksumMismatch);
+    expect(fetched).toContain(SOURCES.aria2c.url);
+  });
+
   it('uses only https release assets', () => {
     for (const source of Object.values(SOURCES)) {
       expect(source.url).toMatch(/^https:\/\/github\.com\//);

@@ -47,10 +47,16 @@ export const SOURCES: Record<BinName, Source> = {
 };
 
 /**
- * SHA-256 of the aria2 1.37.0 Windows zip. aria2 publishes no checksum file, so the
- * value is pinned here. While it is empty the app refuses to install aria2.
+ * SHA-256 of the aria2 1.37.0 Windows zip (2,475,379 bytes). aria2 publishes no
+ * checksum file, so the value is pinned here. Computed on 2026-11-22 from the
+ * release asset and equal to the value recorded for the same URL by the Scoop
+ * Main manifest (aria2 1.37.0-1) and the winget manifest (aria2.aria2 1.37.0, x64).
+ *
+ * The pin guarantees every install gets these exact bytes. It cannot prove the
+ * original build was sound; that rests on the aria2 project and its release page.
+ * An empty value makes the app refuse to install aria2.
  */
-export const ARIA2_ZIP_SHA256 = '';
+export const ARIA2_ZIP_SHA256 = '67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288';
 
 const NAMES: BinName[] = ['yt-dlp', 'ffmpeg', 'aria2c'];
 const VERSION_FLAG: Record<BinName, string> = { 'yt-dlp': '--version', ffmpeg: '-version', aria2c: '--version' };
