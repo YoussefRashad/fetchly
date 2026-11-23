@@ -9,6 +9,8 @@ files:
   - package.json
   - out/**/*
   - '!out/**/*.map'
+  # The exe icon, made by scripts/app-icon.mjs; it belongs to the exe, not inside the app.
+  - '!out/app-icon/**'
   # React is bundled into out/renderer by Vite; the main process never loads it.
   - '!node_modules/react/**'
   - '!node_modules/react-dom/**'
@@ -17,6 +19,7 @@ asar: true
 # No native modules to rebuild.
 npmRebuild: false
 win:
+  icon: out/app-icon/icon.png
   target:
     - target: portable
       arch:
