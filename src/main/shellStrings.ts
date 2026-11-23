@@ -1,6 +1,9 @@
 import { fsi, type Lang } from '../shared/i18n';
 
-/** Text the main process shows itself: tray menu and tooltip, notifications, the runnable-file dialog and the start-up notice. */
+/**
+ * Text the main process shows itself: tray menu and tooltip, notifications, the runnable-file and port-change
+ * dialogs, and the start-up notices (jobs file, pairing file).
+ */
 const EN = {
   trayOpen: 'Open',
   trayPauseAll: 'Pause all',
@@ -22,6 +25,17 @@ const EN = {
   runnableOpen: 'Open',
   runnableCancel: 'Cancel',
   corruptNotice: (path: string) => `The saved download list could not be read and was set aside as ${path}. The list starts empty.`,
+  /** The pairing file could not be read: `aside` is where it went, null when it could not be moved. */
+  pairingNotice: (aside: string | null) =>
+    aside === null
+      ? 'The list of paired browsers could not be read. Pair your browsers again.'
+      : `The list of paired browsers could not be read and was set aside as ${aside}. Pair your browsers again.`,
+  portChangeTitle: 'Change the port?',
+  portChangeMessage: (count: number) =>
+    count === 1 ? 'Changing the port removes the paired browser.' : `Changing the port removes all ${count} paired browsers.`,
+  portChangeDetail: 'Each browser has to be paired again on the new port.',
+  portChangeConfirm: 'Change port',
+  portChangeCancel: 'Cancel',
 };
 
 export type ShellStrings = typeof EN;
@@ -46,6 +60,16 @@ const AR: ShellStrings = {
   runnableOpen: 'فتح',
   runnableCancel: 'إلغاء',
   corruptNotice: (path) => `تعذّرت قراءة قائمة التنزيلات المحفوظة، فنُقلت جانبًا باسم ${fsi(path)}. تبدأ القائمة فارغة.`,
+  pairingNotice: (aside) =>
+    aside === null
+      ? 'تعذّرت قراءة قائمة المتصفحات المربوطة. اربط متصفحاتك من جديد.'
+      : `تعذّرت قراءة قائمة المتصفحات المربوطة، فنُقلت جانبًا باسم ${fsi(aside)}. اربط متصفحاتك من جديد.`,
+  portChangeTitle: 'تغيير المنفذ؟',
+  portChangeMessage: (count) =>
+    count === 1 ? 'تغيير المنفذ يلغي ربط المتصفح المربوط.' : `تغيير المنفذ يلغي ربط كل المتصفحات المربوطة (${count}).`,
+  portChangeDetail: 'يجب ربط كل متصفح من جديد على المنفذ الجديد.',
+  portChangeConfirm: 'تغيير المنفذ',
+  portChangeCancel: 'إلغاء',
 };
 
 export const SHELL_STRINGS: Readonly<Record<Lang, ShellStrings>> = { en: EN, ar: AR };

@@ -36,6 +36,10 @@ const api: FetchlyApi = {
   onStatus: (cb) => subscribe<[AppStatus]>('fetchly:status', cb),
   retryEngines: call('retryEngines'),
   confirmStraysGone: call('confirmStraysGone'),
+  pairingStart: call('pairingStart'),
+  pairingCancel: call('pairingCancel'),
+  pairings: call('pairings'),
+  unpair: call('unpair'),
 };
 
 contextBridge.exposeInMainWorld('fetchly', api);

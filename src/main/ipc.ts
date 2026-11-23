@@ -14,14 +14,19 @@ import {
   type ProbeResult,
   type Quality,
   type Result,
+  type PairingsView,
   type Settings,
   type Snapshot,
 } from '../shared/types';
+import { formatPairingString, isServerPort } from '../shared/protocol';
+import { CONTROL } from '../shared/text';
 import { isRunnableFile } from './fileSafety';
 import { normalizeSettings } from './jobs/store';
 import { copyQuality, everyPosition, isAbsoluteDir, isLangList, isQuality } from './jobs/validate';
 import { sanitizeFileName } from './naming';
 import { InvalidUrl, ProbeError } from './probe';
+import { NOT_LISTENING_TEXT, type PairingStore } from './server/pairing';
+import type { RunningServer } from './server/server';
 import { MAX_HEIGHTS } from './ytdlp/parse';
 
 /** The part of the queue the window can reach. */
@@ -60,11 +65,22 @@ export interface HandlerDeps {
   confirmOpenRunnable(fileName: string): Promise<boolean>;
   showItem(path: string): void;
   startupNotice(): string | null;
+  /** The browser pairings (code, tokens, pairing.json). */
+  pairing: PairingStore;
+  /** The local server: its state, and a listen on a port (also the retry after portBusy or an error). */
+  server: Pick<RunningServer, 'status' | 'ensure'>;
+  /** Asks before a port change removes `count` pairings; true = go on. */
+  confirmPortChange(count: number): Promise<boolean>;
 }
 
 const JOB_VERBS: readonly string[] = ['pause', 'resume', 'cancel', 'retry', 'remove', 'removeWithFile'];
 const GROUP_VERBS: readonly string[] = ['pause', 'resume', 'cancel'];
 const BAD_REQUEST = 'That request is not valid';
+const PORT_TEXT = 'Port must be a whole number from 1024 to 65535';
+const PORT_DECLINED_TEXT = 'Settings were not saved: the port was not changed';
+const SAVING_TEXT = 'Settings are being saved';
+const NOT_PAIRED_TEXT = 'This browser is not paired';
+const UNPAIR_UNSAVED_TEXT = 'Unpaired, but the change is not saved yet; Fetchly keeps trying';
 
 /** The engine status in words: why a handler that needs the queue cannot run, or why a start did not work. */
 function statusText(engine: EngineStatus): string {
@@ -73,9 +89,6 @@ function statusText(engine: EngineStatus): string {
   // 'ready' always comes with a queue, so only 'starting' really reaches this line.
   return 'The download tools are still starting';
 }
-
-// eslint-disable-next-line no-control-regex
-const CONTROL = /[\u0000-\u001f\u007f]/u;
 
 /** C3: a link that, trimmed, still holds a control character never reaches the queue or a spawn. */
 const hasControl = (url: string): boolean => CONTROL.test(url.trim());
@@ -168,6 +181,14 @@ function validProbe(probe: unknown, validateUrl: (raw: string) => string): probe
 export function createHandlers(deps: HandlerDeps) {
   /** The answer of a handler that needs the queue while there is none. */
   const noQueue = (): Result<never> => fail(statusText(deps.status().engine));
+  /** A setSettings call is running (it may be waiting for the port-change dialog). */
+  let settingsBusy = false;
+  /**
+   * The port of the last `ensure` that resolved; the listener is on no other port. It starts as the port the
+   * server was started on. getSettings() can already hold a port the listener never moved to, so a port move is
+   * decided against this value, not against getSettings() (S15).
+   */
+  let listenerPort = deps.getSettings().serverPort;
 
   /** The window's link checked and trimmed; a control character inside it is refused like any bad link (C3). */
   const linkOf = (raw: string): string => {
@@ -263,29 +284,85 @@ export function createHandlers(deps: HandlerDeps) {
 
     getSettings: async (): Promise<Settings> => deps.getSettings(),
 
-    setSettings: (s: Settings): Promise<Result<Settings>> =>
-      guarded(async () => {
-        if (!isObject(s)) return fail(BAD_REQUEST);
-        if (!isLanguageSetting(s.language) || !isThemeSetting(s.theme)) return fail(BAD_REQUEST);
-        if (!isAbsoluteDir(s.downloadDir)) return fail('Choose a download folder');
-        if (!isQuality(s.defaultQuality)) return fail(BAD_REQUEST);
-        if (!isLangList(s.subtitleLangs)) return fail('Subtitle languages must be codes like en or ar');
-        const next = normalizeSettings({
-          language: s.language,
-          theme: s.theme,
-          downloadDir: s.downloadDir,
-          askEveryTime: s.askEveryTime === true,
-          maxConcurrent: Number(s.maxConcurrent),
-          speedLimitKbps: Number(s.speedLimitKbps),
-          autoResumeOnStart: s.autoResumeOnStart === true,
-          preferMp4Max1080: s.preferMp4Max1080 === true,
-          // Rebuilt from its declared fields, so nothing else reaches settings.json or the queue (C2).
-          defaultQuality: copyQuality(s.defaultQuality),
-          subtitleLangs: s.subtitleLangs,
+    /**
+     * Saves the settings. A serverPort other than the port of the last `ensure` that resolved (the listener is on
+     * no other port) removes every pairing (after a confirmation when there are any, S15): the code is cancelled
+     * and the pairings emptied before the save, and the listener moves after it. A port counts as moved only once
+     * `ensure` resolved for it, whatever the status; if the save or the queue throws first, retrying that port is
+     * still a new port. The same port still calls ensure, so saving retries a busy or failed listener. One call at
+     * a time.
+     */
+    setSettings: async (s: Settings): Promise<Result<Settings>> => {
+      if (settingsBusy) return fail(SAVING_TEXT);
+      settingsBusy = true;
+      try {
+        return await guarded(async () => {
+          if (!isObject(s)) return fail(BAD_REQUEST);
+          if (!isLanguageSetting(s.language) || !isThemeSetting(s.theme)) return fail(BAD_REQUEST);
+          if (!isAbsoluteDir(s.downloadDir)) return fail('Choose a download folder');
+          if (!isQuality(s.defaultQuality)) return fail(BAD_REQUEST);
+          if (!isLangList(s.subtitleLangs)) return fail('Subtitle languages must be codes like en or ar');
+          // Tested as given, with no Number(...) coercion: "38917" is not a port (S14).
+          if (!isServerPort(s.serverPort)) return fail(PORT_TEXT);
+          const next = normalizeSettings({
+            language: s.language,
+            theme: s.theme,
+            downloadDir: s.downloadDir,
+            askEveryTime: s.askEveryTime === true,
+            maxConcurrent: Number(s.maxConcurrent),
+            speedLimitKbps: Number(s.speedLimitKbps),
+            autoResumeOnStart: s.autoResumeOnStart === true,
+            preferMp4Max1080: s.preferMp4Max1080 === true,
+            // Rebuilt from its declared fields, so nothing else reaches settings.json or the queue (C2).
+            defaultQuality: copyQuality(s.defaultQuality),
+            subtitleLangs: s.subtitleLangs,
+            serverPort: s.serverPort,
+          });
+          if (next.serverPort !== listenerPort) {
+            const count = deps.pairing.list().length;
+            if (count > 0 && !(await deps.confirmPortChange(count))) return fail(PORT_DECLINED_TEXT);
+            // One synchronous block: the old pairing string dies, the pairings go (written even when the list
+            // was already empty, R2-1), then the save. If the save throws, the listener is not moved.
+            deps.pairing.cancel();
+            deps.pairing.clear();
+          }
+          deps.saveSettings(next);
+          deps.queue()?.setSettings(next);
+          await deps.server.ensure(next.serverPort);
+          listenerPort = next.serverPort;
+          return ok(next);
         });
-        deps.saveSettings(next);
-        deps.queue()?.setSettings(next);
-        return ok(next);
+      } finally {
+        settingsBusy = false;
+      }
+    },
+
+    /** Opens a pairing code; the string carries the port the server really listens on. */
+    pairingStart: (): Promise<Result<{ pairingString: string; lifetimeMs: number }>> =>
+      guarded(async () => {
+        const server = deps.server.status();
+        if (server.state !== 'listening') return fail(NOT_LISTENING_TEXT);
+        const opened = deps.pairing.open();
+        if (!opened.ok) return fail(opened.error);
+        return ok({ pairingString: formatPairingString(server.port, opened.value.code), lifetimeMs: opened.value.lifetimeMs });
+      }),
+
+    pairingCancel: (): Promise<Result<null>> =>
+      guarded(async () => {
+        deps.pairing.cancel();
+        return ok(null);
+      }),
+
+    /** id, label and pairedAt of each pairing; never its origin or key material. */
+    pairings: async (): Promise<PairingsView> => deps.pairing.view(),
+
+    /** Revokes at once; a failed write is retried, and the answer says so. */
+    unpair: (id: string): Promise<Result<null>> =>
+      guarded(async () => {
+        if (typeof id !== 'string') return fail(BAD_REQUEST);
+        if (!deps.pairing.unpair(id)) return fail(NOT_PAIRED_TEXT);
+        if (deps.pairing.view().unsaved) return fail(UNPAIR_UNSAVED_TEXT);
+        return ok(null);
       }),
 
     pickFolder: (): Promise<string | null> => deps.pickFolder(),

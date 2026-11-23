@@ -798,7 +798,7 @@ describe('parseSettings', () => {
         defaultQuality: { kind: 'max', height: 720 },
         subtitleLangs: ['ar'],
       };
-      expect(parseSettings(old, defaults)).toEqual({ ...old, language: 'system', theme: 'system' });
+      expect(parseSettings(old, defaults)).toEqual({ ...old, language: 'system', theme: 'system', serverPort: defaults.serverPort });
     });
   });
 });

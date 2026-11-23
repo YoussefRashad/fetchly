@@ -44,6 +44,7 @@ export function makeSettings(over: Partial<Settings> = {}): Settings {
     preferMp4Max1080: false,
     defaultQuality: { kind: 'best' },
     subtitleLangs: [],
+    serverPort: 38917,
     ...over,
   };
 }

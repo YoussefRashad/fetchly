@@ -1,6 +1,8 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
+import { DEFAULT_SERVER_PORT } from '../../shared/protocol';
 import type { Job, Settings, Snapshot } from '../../shared/types';
+import { writeAtomic } from '../atomicFile';
 import { ACTIVE } from './state';
 import { normalizeSettings, parseSettings, parseSnapshotFile } from './validate';
 
@@ -19,6 +21,7 @@ export function DEFAULT_SETTINGS(downloadsDir: string): Settings {
     preferMp4Max1080: false,
     defaultQuality: { kind: 'best' },
     subtitleLangs: [],
+    serverPort: DEFAULT_SERVER_PORT,
   };
 }
 
@@ -47,11 +50,11 @@ export class Store {
   }
 
   saveSnapshot(s: Snapshot): void {
-    this.writeAtomic(this.jobsPath, JSON.stringify({ version: 1, jobs: s.jobs, groups: s.groups }));
+    writeAtomic(this.dataDir, this.jobsPath, JSON.stringify({ version: 1, jobs: s.jobs, groups: s.groups }));
   }
 
   saveSettings(s: Settings): void {
-    this.writeAtomic(this.settingsPath, JSON.stringify(normalizeSettings(s), null, 2));
+    writeAtomic(this.dataDir, this.settingsPath, JSON.stringify(normalizeSettings(s), null, 2));
   }
 
   private loadSnapshot(): { snapshot: Snapshot; recoveredCorrupt: string | null } {
@@ -81,18 +84,5 @@ export class Store {
     } catch {
       return defaults;
     }
-  }
-
-  private writeAtomic(path: string, data: string): void {
-    mkdirSync(this.dataDir, { recursive: true });
-    const tmp = `${path}.tmp`;
-    const fd = openSync(tmp, 'w');
-    try {
-      writeSync(fd, data);
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-    renameSync(tmp, path);
   }
 }

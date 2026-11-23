@@ -79,6 +79,8 @@ export interface Settings {
   preferMp4Max1080: boolean;
   defaultQuality: Quality;
   subtitleLangs: string[];
+  /** Loopback port of the browser server, 1024..65535; an invalid value loads as 38917, never clamped. */
+  serverPort: number;
 }
 
 /** Why a playlist entry cannot be downloaded; becomes the skipped job's reason. */
@@ -142,10 +144,35 @@ export type EngineStatus =
   | { state: 'ready' }
   | { state: 'error'; message: string };
 
+/**
+ * State of the local server the browser extension talks to.
+ * listening: bound to 127.0.0.1 on `port` (the port the socket really has).
+ * portBusy: `port` is taken by another program; nothing else was tried.
+ * error: no listener, `message` says why.
+ */
+export type ServerStatus = { state: 'listening'; port: number } | { state: 'portBusy'; port: number } | { state: 'error'; message: string };
+
 export interface AppStatus {
   engine: EngineStatus;
   /** Text of the last failed write of jobs.json; null once a write succeeded. */
   saveError: string | null;
+  server: ServerStatus;
+}
+
+/** A paired browser as the window sees it: never its origin, token hash or proof key. */
+export interface PairingInfo {
+  id: string;
+  label: string;
+  /** Date.now() at pairing, for display only. */
+  pairedAt: number;
+}
+
+export interface PairingsView {
+  pairings: PairingInfo[];
+  /** A pairing code is open. */
+  codeOpen: boolean;
+  /** The last pairing change could not be written to disk yet; it is retried. */
+  unsaved: boolean;
 }
 
 /** What the window may ask the main process to do. Exposed as `window.fetchly`. */
@@ -176,4 +203,12 @@ export interface FetchlyApi {
   retryEngines(): Promise<Result<null>>;
   /** The user ended the leftover tool processes by hand: cut-off downloads may resume. */
   confirmStraysGone(): Promise<Result<null>>;
+  /** Opens a pairing code; the answer is `<listening port>-<code>` and how long it stays valid. */
+  pairingStart(): Promise<Result<{ pairingString: string; lifetimeMs: number }>>;
+  /** Closes the open pairing code, if any. */
+  pairingCancel(): Promise<Result<null>>;
+  /** The paired browsers, whether a code is open and whether a change is not saved yet. */
+  pairings(): Promise<PairingsView>;
+  /** Removes one pairing: its token stops working at once. */
+  unpair(id: string): Promise<Result<null>>;
 }

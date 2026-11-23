@@ -1,4 +1,6 @@
 import { win32 } from 'node:path';
+import { DEFAULT_SERVER_PORT, isServerPort } from '../../shared/protocol';
+import { CONTROL } from '../../shared/text';
 import { isLanguageSetting, isThemeSetting } from '../../shared/i18n';
 import { HEIGHTS, type Group, type Job, type JobKind, type JobState, type Quality, type Settings, type Snapshot } from '../../shared/types';
 
@@ -6,8 +8,6 @@ type Obj = Record<string, unknown>;
 
 const JOB_STATES: readonly JobState[] = ['queued', 'probing', 'downloading', 'paused', 'merging', 'done', 'failed', 'skipped'];
 const JOB_KINDS: readonly JobKind[] = ['media', 'file'];
-// eslint-disable-next-line no-control-regex
-const CONTROL = /[\u0000-\u001f\u007f]/u;
 const BASE_NAME_FORBIDDEN = /[\\/:*?"<>|]/u;
 const FILE_NAME_FORBIDDEN = /[\\/:]/u;
 
@@ -233,9 +233,13 @@ const SETTING_CHECKS: { [K in keyof Settings]: (v: unknown) => boolean } = {
   preferMp4Max1080: (v) => typeof v === 'boolean',
   defaultQuality: isQuality,
   subtitleLangs: isLangList,
+  serverPort: isServerPort,
 };
 
-/** Clamps the numeric settings into their allowed ranges. */
+/**
+ * Clamps the numeric settings into their allowed ranges. An invalid server port becomes the default
+ * port, never a clamped one: a clamp could land on a port another program uses.
+ */
 export function normalizeSettings(s: Settings): Settings {
   const max = Number.isFinite(s.maxConcurrent) ? Math.floor(s.maxConcurrent) : 3;
   const limit = Number.isFinite(s.speedLimitKbps) ? Math.floor(s.speedLimitKbps) : 0;
@@ -243,6 +247,7 @@ export function normalizeSettings(s: Settings): Settings {
     ...s,
     maxConcurrent: Math.min(8, Math.max(1, max)),
     speedLimitKbps: Math.max(0, limit),
+    serverPort: isServerPort(s.serverPort) ? s.serverPort : DEFAULT_SERVER_PORT,
   };
 }
 
