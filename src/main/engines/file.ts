@@ -468,6 +468,11 @@ export function aria2DaemonArgs(port: number, secret: string): string[] {
     `--rpc-secret=${secret}`,
     ...ARIA2_PLAIN_HTTP_ARGS,
     '--continue=true',
+    // The .aria2 control file records which bytes are on disk. aria2 saves it on a clean stop
+    // and otherwise only every this many seconds (default 60): an aria2 that is ended (Task
+    // Manager, a crash) loses everything since the last save, and the restarted download
+    // begins again from there. Every second loses at most about a second.
+    '--auto-save-interval=1',
     '--max-connection-per-server=8',
     '--split=8',
     '--min-split-size=1M',

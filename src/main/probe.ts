@@ -14,6 +14,10 @@ export class InvalidUrl extends Error {
 
 /** Why a link cannot be added; `reason` is shown to the user as is. */
 const STOPPED_EARLY = 'yt-dlp stopped before it could read the link. Try again.';
+const UNREADABLE = 'could not read the video information';
+
+/** The most yt-dlp output a link probe reads; a long playlist is several MB of JSON. */
+const PROBE_OUTPUT_CAP = 64 * 1024 * 1024;
 
 export class ProbeError extends Error {
   constructor(readonly reason: string) {
@@ -40,6 +44,8 @@ interface Ran {
   stderr: string;
   timedOut: boolean;
   missing: boolean;
+  /** The output passed PROBE_OUTPUT_CAP, so Node ended yt-dlp. */
+  overCap: boolean;
 }
 
 function run(exe: Exe, args: string[], timeoutMs: number): Promise<Ran> {
@@ -49,7 +55,7 @@ function run(exe: Exe, args: string[], timeoutMs: number): Promise<Ran> {
       [...exe.prefixArgs, ...args],
       {
         timeout: timeoutMs,
-        maxBuffer: 64 * 1024 * 1024, // a long playlist is several MB of JSON
+        maxBuffer: PROBE_OUTPUT_CAP,
         windowsHide: true,
         encoding: 'utf8',
         env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
@@ -62,6 +68,8 @@ function run(exe: Exe, args: string[], timeoutMs: number): Promise<Ran> {
           stderr,
           timedOut: e?.killed === true,
           missing: e?.code === 'ENOENT',
+          // Node ends the process itself; the error carries this code and no exit code of its own.
+          overCap: e?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
         });
       },
     );
@@ -133,6 +141,8 @@ async function probeFile(url: string, fetchImpl: typeof fetch): Promise<ProbeRes
 export async function probeUrl(url: string, ytdlp: Exe, fetchImpl: typeof fetch = fetch, timeoutMs = 30000): Promise<ProbeResult> {
   const ran = await run(ytdlp, probeArgs(url), timeoutMs);
   if (ran.missing) throw new ProbeError('yt-dlp is not installed');
+  // Too much information fails the same way every time, so it is not a "try again".
+  if (ran.overCap) throw new ProbeError(UNREADABLE);
   if (ran.timedOut) throw new ProbeError('timed out reading the link');
 
   if (ran.code !== 0) {
@@ -148,7 +158,7 @@ export async function probeUrl(url: string, ytdlp: Exe, fetchImpl: typeof fetch 
   try {
     info = JSON.parse(ran.stdout);
   } catch {
-    throw new ProbeError('could not read the video information');
+    throw new ProbeError(UNREADABLE);
   }
   if (typeof info === 'object' && info !== null) {
     const o = info as Record<string, unknown>;
@@ -158,6 +168,6 @@ export async function probeUrl(url: string, ytdlp: Exe, fetchImpl: typeof fetch 
   try {
     return parseProbe(ran.stdout);
   } catch {
-    throw new ProbeError('could not read the video information');
+    throw new ProbeError(UNREADABLE);
   }
 }
