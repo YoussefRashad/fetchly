@@ -218,24 +218,103 @@ ul {
   overflow: hidden;
 }
 
+/*
+ * One set of columns for the headings, the rows and the playlist heads:
+ * name, quality, size, status, speed, time left, added, actions.
+ * The name and the status share the free width (2:1); the name keeps at least 120px.
+ */
+.jobs-head,
 .job-main,
 .group-head {
   display: grid;
-  /* The name keeps at least 120px: at the narrowest window the status gives way first. */
-  grid-template-columns: minmax(120px, 1fr) 56px 136px minmax(110px, 180px) auto;
+  grid-template-columns: minmax(120px, 2fr) 56px 136px minmax(80px, 1fr) 76px 80px 100px auto;
   gap: 10px;
   align-items: center;
   padding: 8px 10px;
 }
 
+/* A playlist head has its arrow first; the arrow takes its width from the name. */
 .group-head {
-  grid-template-columns: auto minmax(120px, 1fr) 56px 136px minmax(110px, 180px) auto;
+  grid-template-columns: auto minmax(100px, 2fr) 56px 136px minmax(80px, 1fr) 76px 80px 100px auto;
   font-weight: 600;
 }
 
+/* The headings: quiet, and inside the same 1px border the rows have, so they line up. */
+.jobs-head {
+  border: 1px solid transparent;
+  padding-block: 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Arabic needs a size up to read as well at heading size. */
+:lang(ar) .jobs-head {
+  font-size: 13px;
+}
+
+/* Over the cells' own sizes and colours, so every heading reads the same. */
+.jobs-head > span {
+  color: inherit;
+  font-size: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Room for the widest set of buttons (a finished download's), so every row's columns line up. */
-.job-main .job-actions {
+.jobs-head .job-actions,
+.job-main .job-actions,
+.group-head .job-actions {
   min-width: 156px;
+}
+
+.job-speed,
+.job-eta,
+.job-added {
+  color: var(--muted);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.jobs-head .job-size,
+.job-speed,
+.job-eta {
+  text-align: end;
+}
+
+/* A narrow window drops the date added first, then the time left; the name keeps its room. */
+@media (max-width: 1000px) {
+  .jobs-head,
+  .job-main {
+    grid-template-columns: minmax(120px, 2fr) 56px 136px minmax(80px, 1fr) 76px 80px auto;
+  }
+
+  .group-head {
+    grid-template-columns: auto minmax(100px, 2fr) 56px 136px minmax(80px, 1fr) 76px 80px auto;
+  }
+
+  .job-added {
+    display: none;
+  }
+}
+
+@media (max-width: 880px) {
+  .jobs-head,
+  .job-main {
+    grid-template-columns: minmax(120px, 2fr) 56px 136px minmax(80px, 1fr) 76px auto;
+  }
+
+  .group-head {
+    grid-template-columns: auto minmax(100px, 2fr) 56px 136px minmax(80px, 1fr) 76px auto;
+  }
+
+  .job-eta {
+    display: none;
+  }
 }
 
 .twisty {

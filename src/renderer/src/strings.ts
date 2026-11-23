@@ -35,9 +35,22 @@ export const EN = {
   confirmCancelGroup: (title: string) => `Cancel the rest of "${title}"? Finished files are kept; unfinished ones are deleted.`,
   confirmDeleteFile: (title: string) => `Delete the file of "${title}" from disk?`,
   items: (done: number, total: number) => `${done} / ${total}`,
+  /** Formats the date-added column (Western digits in both languages). */
+  dateLocale: 'en-GB',
+  /** The list's column headings; the actions column has none. */
+  columns: {
+    name: 'File name',
+    quality: 'Quality',
+    size: 'Size',
+    status: 'Status',
+    speed: 'Speed',
+    timeLeft: 'Time left',
+    added: 'Added',
+  },
   status: {
     queued: 'queued',
     starting: 'starting…',
+    downloading: 'downloading',
     finishing: 'finishing…',
     done: 'done',
     failed: 'failed',

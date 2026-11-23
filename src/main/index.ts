@@ -33,7 +33,8 @@ let flushPairings: (() => void) | null = null;
 
 function createWindow(): BrowserWindow {
   const w = new BrowserWindow({
-    width: 1000,
+    // Wide enough that every list column, the date added included, shows at the start size.
+    width: 1120,
     height: 650,
     minWidth: 760,
     minHeight: 480,

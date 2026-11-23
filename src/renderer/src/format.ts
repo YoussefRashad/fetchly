@@ -44,9 +44,42 @@ export function reasonText(reason: string): string {
   return reason;
 }
 
+/** The speed column: only while the job downloads, and only once a speed is known. */
+export function speedText(job: Job): string {
+  return job.state === 'downloading' ? formatSpeed(job.speed) : '';
+}
+
+/** The time-left column: only while the job downloads, and only once the tool gives an estimate. */
+export function etaText(job: Job): string {
+  return job.state === 'downloading' ? formatEta(job.eta) : '';
+}
+
 /**
- * The parts of a job's status, shown joined by " · ". The downloaded bytes are not among them:
- * the size column shows those.
+ * The date-added column, short: the time for today, the day and month for this year, else the full date.
+ * Digits stay Western in both languages (the locale comes from the strings in use).
+ */
+export function addedText(createdAt: number, now: number = Date.now()): string {
+  const at = new Date(createdAt);
+  const today = new Date(now);
+  const sameYear = at.getFullYear() === today.getFullYear();
+  const sameDay = sameYear && at.getMonth() === today.getMonth() && at.getDate() === today.getDate();
+  const options: Intl.DateTimeFormatOptions = sameDay
+    ? { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }
+    : sameYear
+      ? { day: 'numeric', month: 'short' }
+      : { day: 'numeric', month: 'short', year: 'numeric' };
+  return new Intl.DateTimeFormat(S.dateLocale, options).format(at);
+}
+
+/** The date added in full, for the cell's tooltip. */
+export function addedTitle(createdAt: number): string {
+  const options: Intl.DateTimeFormatOptions = { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
+  return new Intl.DateTimeFormat(S.dateLocale, options).format(new Date(createdAt));
+}
+
+/**
+ * The parts of a job's status, shown joined by " · ". The downloaded bytes, the speed and the time
+ * left are not among them: their own columns show those.
  */
 export function statusParts(job: Job): string[] {
   const pct = percent(job);
@@ -57,9 +90,9 @@ export function statusParts(job: Job): string[] {
     case 'probing':
       return [t.starting];
     case 'downloading': {
-      const parts = [pct === null ? '' : `${pct}%`, formatSpeed(job.speed), formatEta(job.eta)];
+      const parts = [pct === null ? t.downloading : `${pct}%`];
       if (!job.resumable) parts.push(t.cannotResume);
-      return parts.filter((p) => p !== '');
+      return parts;
     }
     case 'paused': {
       const parts = [pct === null ? t.paused : t.pausedAt(pct)];
