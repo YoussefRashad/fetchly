@@ -1,6 +1,12 @@
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { copyQuality, isAbsoluteDir, isLangList, isQuality, isUsableDoneName, normalizeSettings, parseSettings, parseSnapshotFile } from '../../src/main/jobs/validate';
+import { Store } from '../../src/main/jobs/store';
 import { validateUrl } from '../../src/main/probe';
+// Task T1 defines these two in src/shared/protocol.ts; M1's parseJob depends on them. Only the agreement test calls them.
+import { isUserAgent, reduceReferer } from '../../src/shared/protocol';
 import { HEIGHTS, type Group, type Job, type Quality, type Settings } from '../../src/shared/types';
 import { makeJob, makeSettings } from '../helpers';
 
@@ -611,6 +617,673 @@ describe('parseSnapshotFile', () => {
     single<unknown>([null, [], 'x', 5, { jobs: 'nope', groups: [] }, { jobs: [], groups: {} }, { jobs: [null], groups: [] }, { jobs: [[]], groups: [] }, { jobs: [] }, { groups: [] }]),
   )('rejects the shape %j', (raw) => {
     expect(parseSnapshotFile(raw)).toBeNull();
+  });
+});
+
+/**
+ * M1 (A3, plan 3.2 "The migration"): Job gains referer, userAgent and oneShotLogin; jobs.json stays at version 1.
+ * Plan lines cited below are in docs/plans/2026-11-24-phase2-a3-handoff.md.
+ */
+describe('referer, userAgent and oneShotLogin (A3, M1)', () => {
+  /** The three fields M1 adds to Job (src/shared/types.ts). */
+  const NEW_KEYS = ['referer', 'userAgent', 'oneShotLogin'] as const;
+  /**
+   * Every field a Job had before M1, as src/shared/types.ts lists them: 23. M1 must add the three above
+   * and change how none of these is read.
+   */
+  const OLD_KEYS = [
+    'id',
+    'groupId',
+    'kind',
+    'url',
+    'title',
+    'state',
+    'reason',
+    'quality',
+    'subtitleLangs',
+    'dir',
+    'baseName',
+    'fileName',
+    'index',
+    'bytesDone',
+    'bytesTotal',
+    'speed',
+    'eta',
+    'actualHeight',
+    'resumable',
+    'attempts',
+    'createdAt',
+    'interrupted',
+    'sourceHeight',
+  ] as const;
+  /** What each new key loads as when it is absent (plan line 153). */
+  const DEFAULTS = { referer: null, userAgent: null, oneShotLogin: false };
+
+  const R = 'https://a.example/p/q';
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/158.0.0.0 Safari/537.36';
+  const ORIGIN = 'https://a.example/';
+
+  /** A job as a file written before M1 holds it: the three new keys are not there, whatever makeJob carries. */
+  function stored(over: Record<string, unknown> = {}): Record<string, unknown> {
+    const job: Record<string, unknown> = { ...makeJob({ id: 'j1', createdAt: 1, sourceHeight: 1080 }) };
+    for (const key of NEW_KEYS) delete job[key];
+    for (const [key, value] of Object.entries(over)) {
+      if (value === MISSING) delete job[key];
+      else job[key] = value;
+    }
+    return job;
+  }
+  const fileOf = (...jobs: Record<string, unknown>[]) => ({ version: 1, jobs, groups: [] });
+  const parsedOf = (over: Record<string, unknown> = {}) => parseSnapshotFile(fileOf(stored(over)));
+  const loadedJob = (over: Record<string, unknown> = {}): Job | undefined => parsedOf(over)?.jobs[0];
+  const pick = (job: object | undefined, keys: readonly string[]): Record<string, unknown> =>
+    Object.fromEntries(keys.map((k) => [k, (job as Record<string, unknown> | undefined)?.[k]]));
+
+  /** U+0000 to U+001F and U+007F: C0 and DEL. */
+  const CONTROL_CODES = [...Array.from({ length: 0x20 }, (_, i) => i), 0x7f];
+  const codeLabel = (code: number): string => `U+${code.toString(16).toUpperCase().padStart(4, '0')}`;
+
+  // ---- values ----
+
+  // What the URL parser writes for the path of PA3-6b. Idempotent by construction, and the spec checks it: this
+  // Node writes %5E for ^, an older one may not, so the stored value is the platform's own reduction.
+  const PA36B_RAW = "https://a.example/a|b[c]'d^e/f%41g";
+  const PA36B = new URL(PA36B_RAW).origin + new URL(PA36B_RAW).pathname;
+
+  const VALID_REFERERS: [string, string][] = [
+    ['an https page', R],
+    ['the origin with its slash', ORIGIN],
+    ['an http page', 'http://a.example/p'],
+    ['a host with a port', 'http://localhost:8080/x'],
+    ['an IPv6 host', 'http://[::1]:8080/x'],
+    ['a percent-encoded quote, %22', 'https://a.example/a%22b'],
+    ['a percent-encoded non-ASCII letter', 'https://a.example/%C3%A9'],
+    ['the path of PA3-6b as the URL parser writes it', PA36B],
+    ['exactly 2048 UTF-16 units', ORIGIN + 'a'.repeat(2048 - ORIGIN.length)],
+  ];
+
+  /**
+   * Plan line 155: a stored Referer is kept when v === reduceReferer(v), and reduceReferer (line 180) returns
+   * origin + pathname of the parsed URL, or null. So a query, a hash, a quote, a control character, userinfo,
+   * another scheme, an unparsable text, and any text that is not already its own reduction, are all "present,
+   * invalid" (line 156) and load as null. The file is not set aside for these.
+   */
+  const BAD_REFERERS: [string, unknown][] = [
+    // wrong type
+    ['a number', 5],
+    ['true', true],
+    ['false', false],
+    ['an object', {}],
+    ['a list', [R]],
+    ['an empty list', []],
+    // not a URL, or not http(s)
+    ['an empty text', ''],
+    ['a relative path', '/p/q'],
+    ['a host with no scheme', 'a.example/p'],
+    ['a bare word', 'x'],
+    ['ftp', 'ftp://a.example/p'],
+    ['a javascript link', 'javascript:alert(1)'],
+    ['a data link', 'data:text/plain,hi'],
+    ['a file link', 'file:///C:/x'],
+    ['a websocket link', 'ws://a.example/p'],
+    // userinfo
+    ['userinfo with a name', 'https://user@a.example/p'],
+    ['userinfo with a name and a password', 'https://user:pw@a.example/p'],
+    // a query
+    ['a query', 'https://a.example/p?token=1'],
+    ['a bare question mark', 'https://a.example/p?'],
+    ['a query on the origin', 'https://a.example/?x'],
+    // a hash: reduceReferer keeps origin + pathname only (plan lines 180 and 192), so v !== reduceReferer(v)
+    ['a hash', 'https://a.example/p#frag'],
+    ['a bare hash mark', 'https://a.example/p#'],
+    ['a query and a hash (the example of Task T1)', 'https://a.example/p/q?token=1#f'],
+    // a double quote
+    ['a double quote in the path', 'https://a.example/a"b'],
+    ['a double quote at the end', 'https://a.example/"'],
+    ['a double quote around the whole text', '"https://a.example/p"'],
+    // `"` is a legal host character for the URL parser, so origin + pathname keeps it raw unless the explicit
+    // check rejects it (plan line 182, A3-Q24); a fullwidth quote is mapped to `"` in a host.
+    ['a double quote inside the host', 'https://a"b.example/p'],
+    ['a double quote at the start of the host', 'https://"a.example/p'],
+    ['a double quote at the end of the host', 'https://a.example"/p'],
+    ['a fullwidth double quote inside the host', 'https://a＂b.example/p'],
+    // valid as a URL, but not its own reduction (v !== reduceReferer(v))
+    ['the bare origin, without its slash', 'https://a.example'],
+    ['an upper-case host', 'https://A.example/p'],
+    ['an upper-case scheme', 'HTTPS://a.example/p'],
+    ['an explicit default https port', 'https://a.example:443/p'],
+    ['an explicit default http port', 'http://a.example:80/p'],
+    ['dot segments', 'https://a.example/a/../b'],
+    ['a space in the path', 'https://a.example/a b'],
+    ['a leading space', ' https://a.example/p'],
+    ['a trailing space', 'https://a.example/p '],
+    ['a non-ASCII letter', 'https://a.example/\u00e9'],
+    ['an emoji', 'https://a.example/\u{1f600}'],
+    // too long: REFERER_MAX is 2048 UTF-16 units
+    ['2049 UTF-16 units', ORIGIN + 'a'.repeat(2049 - ORIGIN.length)],
+    ['4096 UTF-16 units', ORIGIN + 'a'.repeat(4096 - ORIGIN.length)],
+  ];
+  const REFERER_WITH_CONTROL: [string, string][] = CONTROL_CODES.flatMap((code) => {
+    const c = String.fromCharCode(code);
+    const label = codeLabel(code);
+    return [
+      [`${label} inside the path`, `https://a.example/p${c}q`],
+      [`${label} at the end`, `https://a.example/p${c}`],
+      [`${label} at the start`, `${c}https://a.example/p`],
+    ] as [string, string][];
+  });
+
+  /** Plan line 185: ^[\x20-\x7E]{1,512}$, so the value PA3-6 measured is accepted too. */
+  const HOSTILE_UA = 'a"b\\c %PATH% ^ & | < > ` $(x) ; --output=evil -o x';
+  const PRINTABLE_ASCII = Array.from({ length: 0x7e - 0x20 + 1 }, (_, i) => String.fromCharCode(0x20 + i)).join('');
+  const VALID_UAS: [string, string][] = [
+    ['a browser string', UA],
+    ['one character', 'a'],
+    ['exactly 512 characters', 'a'.repeat(512)],
+    ['the value PA3-6 measured, with a quote, a backslash and shell characters', HOSTILE_UA],
+    ['a single space (U+0020 is inside the class)', ' '],
+    ['every printable ASCII character', PRINTABLE_ASCII],
+    ['a value that looks like a link', R],
+  ];
+  const BAD_UAS: [string, unknown][] = [
+    ['a number', 5],
+    ['true', true],
+    ['an object', {}],
+    ['a list', [UA]],
+    ['an empty list', []],
+    ['an empty text', ''],
+    ['513 characters', 'a'.repeat(513)],
+    ['600 characters', 'a'.repeat(600)],
+    ['a letter with an accent', 'Mozilla/5.0 \u00e9'],
+    ['Arabic letters', 'متصفح'],
+    ['an emoji', 'Mozilla \u{1f600}'],
+    ['a C1 control, U+0080', 'a\u0080b'],
+    ['a no-break space, U+00A0', 'a\u00a0b'],
+    ['a line separator, U+2028', 'a\u2028b'],
+    ['a byte order mark, U+FEFF', 'a\ufeffb'],
+  ];
+  const UA_WITH_CONTROL: [string, string][] = CONTROL_CODES.flatMap((code) => {
+    const c = String.fromCharCode(code);
+    const label = codeLabel(code);
+    return [
+      [`${label} inside the text`, `a${c}b`],
+      [`${label} at the end`, `ab${c}`],
+      [`${label} at the start`, `${c}ab`],
+    ] as [string, string][];
+  });
+
+  /** Not booleans: oneShotLogin makes the whole job invalid for each (plan line 156), like `interrupted`. */
+  const NOT_BOOLEAN: [string, unknown][] = [
+    ['null', null],
+    ['"true"', 'true'],
+    ['"false"', 'false'],
+    ['an empty text', ''],
+    ['0', 0],
+    ['1', 1],
+    ['-1', -1],
+    ['2', 2],
+    ['NaN', Number.NaN],
+    ['an empty list', []],
+    ['a list holding true', [true]],
+    ['an empty object', {}],
+    ['an object holding true', { value: true }],
+  ];
+
+  it('the platform reduction used as a fixture is its own reduction and holds no quote', () => {
+    expect(new URL(PA36B).origin + new URL(PA36B).pathname).toBe(PA36B);
+    expect(PA36B).not.toContain('"');
+    expect(PA36B).toMatch(/^[\x21-\x7E]+$/u);
+  });
+
+  // ---- the table of plan 3.2, row by row ----
+
+  describe('a key that is absent (a file written before M1)', () => {
+    it('loads referer and userAgent as null and oneShotLogin as false', () => {
+      expect(loadedJob()).toMatchObject(DEFAULTS);
+    });
+
+    it.each(NEW_KEYS)('reads %s as its own default when only that key is missing and the others are set', (key) => {
+      const set = { referer: R, userAgent: UA, oneShotLogin: true };
+      const job = loadedJob({ ...set, [key]: MISSING });
+      expect(job).toMatchObject({ ...set, [key]: DEFAULTS[key] });
+    });
+
+    it('has an own key for each of the three, not an absent one, so the next save writes them', () => {
+      const job = loadedJob();
+      for (const key of NEW_KEYS) expect(Object.hasOwn(job ?? {}, key), key).toBe(true);
+    });
+
+    it('does not make the file invalid', () => {
+      expect(parsedOf()).not.toBeNull();
+    });
+  });
+
+  describe('null', () => {
+    it('loads referer null and userAgent null as null, and the job is valid', () => {
+      const parsed = parsedOf({ referer: null, userAgent: null });
+      expect(parsed).not.toBeNull();
+      expect(parsed?.jobs[0]).toMatchObject({ referer: null, userAgent: null, oneShotLogin: false });
+    });
+
+    it('loads referer null beside a valid userAgent, and the reverse', () => {
+      expect(loadedJob({ referer: null, userAgent: UA })).toMatchObject({ referer: null, userAgent: UA });
+      expect(loadedJob({ referer: R, userAgent: null })).toMatchObject({ referer: R, userAgent: null });
+    });
+
+    it('makes the job invalid for oneShotLogin null: the file is rejected', () => {
+      expect(parsedOf({ oneShotLogin: null })).toBeNull();
+    });
+
+    it('makes the job invalid for oneShotLogin null whatever the other two hold', () => {
+      expect(parsedOf({ referer: null, userAgent: null, oneShotLogin: null })).toBeNull();
+      expect(parsedOf({ referer: R, userAgent: UA, oneShotLogin: null })).toBeNull();
+      expect(parsedOf({ referer: MISSING, userAgent: MISSING, oneShotLogin: null })).toBeNull();
+    });
+  });
+
+  describe('a valid value is kept', () => {
+    it.each(VALID_REFERERS)('keeps the Referer: %s', (_name, referer) => {
+      expect(loadedJob({ referer })?.referer).toBe(referer);
+    });
+
+    it.each(VALID_UAS)('keeps the User-Agent byte for byte: %s', (_name, userAgent) => {
+      expect(loadedJob({ userAgent })?.userAgent).toBe(userAgent);
+    });
+
+    it.each([true, false])('keeps oneShotLogin %s', (oneShotLogin) => {
+      expect(loadedJob({ oneShotLogin })?.oneShotLogin).toBe(oneShotLogin);
+    });
+
+    it('keeps the three together, each under its own name', () => {
+      expect(loadedJob({ referer: R, userAgent: UA, oneShotLogin: true })).toMatchObject({ referer: R, userAgent: UA, oneShotLogin: true });
+    });
+
+    it('keeps the User-Agent that holds a double quote, which a Referer may not hold', () => {
+      expect(loadedJob({ userAgent: HOSTILE_UA, referer: 'https://a.example/a"b' })).toMatchObject({ userAgent: HOSTILE_UA, referer: null });
+    });
+  });
+
+  describe('a Referer that is present and invalid loads as null; the file is not set aside (A3-Q5)', () => {
+    it.each(BAD_REFERERS)('loads a Referer that is %s as null and keeps the job', (_name, referer) => {
+      const parsed = parsedOf({ referer, userAgent: UA, oneShotLogin: true });
+      expect(parsed).not.toBeNull();
+      expect(parsed?.jobs[0]).toMatchObject({ referer: null, userAgent: UA, oneShotLogin: true });
+    });
+
+    it.each(REFERER_WITH_CONTROL)('loads a Referer with %s as null and keeps the job', (_name, referer) => {
+      const parsed = parsedOf({ referer, userAgent: UA, oneShotLogin: true });
+      expect(parsed).not.toBeNull();
+      expect(parsed?.jobs[0]).toMatchObject({ referer: null, userAgent: UA, oneShotLogin: true });
+    });
+
+    it('never keeps a query, a hash or a raw quote in what it loads', () => {
+      for (const [name, referer] of BAD_REFERERS) {
+        if (typeof referer !== 'string') continue;
+        const kept = loadedJob({ referer })?.referer;
+        expect(kept, name).toBeNull();
+      }
+    });
+  });
+
+  describe('a User-Agent that is present and invalid loads as null; the file is not set aside (A3-Q5)', () => {
+    it.each(BAD_UAS)('loads a User-Agent that is %s as null and keeps the job', (_name, userAgent) => {
+      const parsed = parsedOf({ referer: R, userAgent, oneShotLogin: true });
+      expect(parsed).not.toBeNull();
+      expect(parsed?.jobs[0]).toMatchObject({ referer: R, userAgent: null, oneShotLogin: true });
+    });
+
+    it.each(UA_WITH_CONTROL)('loads a User-Agent with %s as null and keeps the job', (_name, userAgent) => {
+      const parsed = parsedOf({ referer: R, userAgent, oneShotLogin: true });
+      expect(parsed).not.toBeNull();
+      expect(parsed?.jobs[0]).toMatchObject({ referer: R, userAgent: null, oneShotLogin: true });
+    });
+  });
+
+  describe('oneShotLogin that is not a boolean makes the job invalid, as interrupted does (A3-Q5)', () => {
+    it.each(NOT_BOOLEAN)('rejects the file when oneShotLogin is %s', (_name, oneShotLogin) => {
+      expect(parsedOf({ oneShotLogin })).toBeNull();
+    });
+
+    it.each(NOT_BOOLEAN)('rejects the file when oneShotLogin is %s on a skipped job with no url too', (_name, oneShotLogin) => {
+      expect(parsedOf({ state: 'skipped', reason: 'private', url: '', oneShotLogin })).toBeNull();
+    });
+
+    it('rejects the whole file when one job of many has a bad oneShotLogin', () => {
+      const jobs = [stored({ id: 'a' }), stored({ id: 'b', oneShotLogin: 'true' }), stored({ id: 'c' })];
+      expect(parseSnapshotFile(fileOf(...jobs))).toBeNull();
+    });
+
+    it('treats interrupted and oneShotLogin alike: the same values reject the file', () => {
+      for (const [name, value] of NOT_BOOLEAN) {
+        expect(parsedOf({ oneShotLogin: value }) === null, `oneShotLogin ${name}`).toBe(parsedOf({ interrupted: value }) === null);
+      }
+    });
+
+    it('does not let a valid header rescue a bad oneShotLogin', () => {
+      expect(parsedOf({ referer: R, userAgent: UA, oneShotLogin: 1 })).toBeNull();
+    });
+  });
+
+  describe('the length limits, each at the limit and one past it', () => {
+    it('REFERER_MAX is 2048: 2048 units load, 2049 load as null', () => {
+      expect(loadedJob({ referer: ORIGIN + 'a'.repeat(2048 - ORIGIN.length) })?.referer).toHaveLength(2048);
+      expect(loadedJob({ referer: ORIGIN + 'a'.repeat(2049 - ORIGIN.length) })?.referer).toBeNull();
+    });
+
+    it('UA_MAX is 512: 512 characters load, 513 load as null', () => {
+      expect(loadedJob({ userAgent: 'a'.repeat(512) })?.userAgent).toHaveLength(512);
+      expect(loadedJob({ userAgent: 'a'.repeat(513) })?.userAgent).toBeNull();
+    });
+
+    it('the limits are counted per field: a long Referer does not null a User-Agent at its limit', () => {
+      const job = loadedJob({ referer: ORIGIN + 'a'.repeat(2049 - ORIGIN.length), userAgent: 'a'.repeat(512) });
+      expect(job).toMatchObject({ referer: null, userAgent: 'a'.repeat(512) });
+    });
+  });
+
+  describe('one field at a time', () => {
+    const REFERERS: [string, unknown, string | null][] = [
+      ['valid', R, R],
+      ['bad (a query)', `${R}?x=1`, null],
+      ['absent', MISSING, null],
+      ['null', null, null],
+    ];
+    const AGENTS: [string, unknown, string | null][] = [
+      ['valid', UA, UA],
+      ['bad (a line feed)', 'a\nb', null],
+      ['absent', MISSING, null],
+      ['null', null, null],
+    ];
+    const FLAGS: [string, unknown, boolean][] = [
+      ['true', true, true],
+      ['false', false, false],
+      ['absent', MISSING, false],
+    ];
+    const rows = REFERERS.flatMap(([rn, rv, re]) =>
+      AGENTS.flatMap(([an, av, ae]) => FLAGS.map(([fn, fv, fe]) => [rn, an, fn, { referer: rv, userAgent: av, oneShotLogin: fv }, { referer: re, userAgent: ae, oneShotLogin: fe }] as const)),
+    );
+
+    it.each(rows)('referer %s, userAgent %s, oneShotLogin %s: each loads by its own rule', (_r, _a, _f, input, expected) => {
+      expect(loadedJob(input)).toMatchObject(expected);
+    });
+
+    it('a bad Referer or User-Agent on one job leaves every other job of the file as it was', () => {
+      const jobs = [
+        stored({ id: 'a', referer: `${R}?token=1`, userAgent: 'a\nb' }),
+        stored({ id: 'b', referer: R, userAgent: UA, oneShotLogin: true }),
+        stored({ id: 'c' }),
+      ];
+      const parsed = parseSnapshotFile(fileOf(...jobs));
+      expect(parsed?.jobs.map((j) => [j.id, j.referer, j.userAgent, j.oneShotLogin])).toEqual([
+        ['a', null, null, false],
+        ['b', R, UA, true],
+        ['c', null, null, false],
+      ]);
+    });
+
+    it('does not swap the Referer and the User-Agent', () => {
+      const job = loadedJob({ referer: R, userAgent: 'Some Agent/1.0' });
+      expect(job?.referer).toBe(R);
+      expect(job?.userAgent).toBe('Some Agent/1.0');
+    });
+  });
+
+  describe('every kind and state of job carries the three fields alike', () => {
+    const STATES = ['queued', 'probing', 'downloading', 'paused', 'merging', 'done', 'failed', 'skipped'] as const;
+
+    it.each(STATES)('a %s media job', (state) => {
+      const over = { state, fileName: state === 'done' ? 'a.mp4' : null, url: state === 'skipped' ? '' : 'https://example.com/v', referer: R, userAgent: UA, oneShotLogin: true };
+      expect(loadedJob(over)).toMatchObject({ state, referer: R, userAgent: UA, oneShotLogin: true });
+    });
+
+    it('a file job', () => {
+      const over = { kind: 'file', quality: null, baseName: null, fileName: 'a.zip', referer: R, userAgent: UA, oneShotLogin: false };
+      expect(loadedJob(over)).toMatchObject({ kind: 'file', referer: R, userAgent: UA, oneShotLogin: false });
+    });
+
+    it('a member of a group, with oneShotLogin true: it loads as stored and the group stays (A3-Q16)', () => {
+      const job = stored({ groupId: 'g1', index: 1, referer: R, userAgent: UA, oneShotLogin: true });
+      const parsed = parseSnapshotFile({ version: 1, jobs: [job], groups: [group] });
+      expect(parsed?.jobs[0]).toMatchObject({ groupId: 'g1', oneShotLogin: true, referer: R, userAgent: UA });
+      expect(parsed?.groups).toEqual([group]);
+    });
+
+    it('a skipped placeholder with no url', () => {
+      const over = { state: 'skipped', reason: 'private', url: '', referer: R, userAgent: UA, oneShotLogin: false };
+      expect(loadedJob(over)).toMatchObject({ state: 'skipped', url: '', referer: R, userAgent: UA });
+    });
+  });
+
+  describe('no old field is read differently (all 23 fields of Job before M1)', () => {
+    const VARIANTS: [string, Record<string, unknown>][] = [
+      ['no new key', {}],
+      ['all three valid', { referer: R, userAgent: UA, oneShotLogin: true }],
+      ['a bad Referer and a bad User-Agent', { referer: `${R}?x=1`, userAgent: 'a\nb' }],
+      ['all three null-ish where allowed', { referer: null, userAgent: null, oneShotLogin: false }],
+    ];
+
+    it('lists the 23 old fields and builds a job from exactly those and the three new ones', () => {
+      expect(new Set(OLD_KEYS).size).toBe(23);
+      const job = loadedJob({ referer: R, userAgent: UA, oneShotLogin: true, mystery: 1 });
+      expect(Object.keys(job ?? {}).sort()).toEqual([...OLD_KEYS, ...NEW_KEYS].sort());
+      expect(job).not.toHaveProperty('mystery');
+    });
+
+    it.each(VARIANTS)('reads every old field as before with %s', (_name, over) => {
+      const input = stored(over);
+      expect(pick(parsedOf(over)?.jobs[0], OLD_KEYS)).toEqual(pick(input, OLD_KEYS));
+    });
+
+    const OLD_BAD: [string, Record<string, unknown>][] = [
+      ['an unknown state', { state: 'finished' }],
+      ['negative attempts', { attempts: -1 }],
+      ['interrupted as null', { interrupted: null }],
+      ['resumable as text', { resumable: 'yes' }],
+      ['a relative folder', { dir: 'relative' }],
+      ['an impossible quality', { quality: { kind: 'max', height: 999 } }],
+      ['a queued job with a url that is not http', { url: 'abc123' }],
+      ['a job whose group is not listed', { groupId: 'ghost' }],
+    ];
+    it.each(OLD_BAD.flatMap(([name, bad]) => VARIANTS.map(([variant, over]) => [name, variant, { ...over, ...bad }] as const)))(
+      'still rejects the file for %s with %s',
+      (_name, _variant, over) => {
+        expect(parsedOf(over)).toBeNull();
+      },
+    );
+
+    it.each(VARIANTS)('still loads a bad meter as its neutral value with %s', (_name, over) => {
+      const job = loadedJob({ ...over, eta: -5, actualHeight: 0, bytesDone: '5', speed: null, sourceHeight: -1 });
+      expect(job).toMatchObject({ eta: null, actualHeight: null, bytesDone: 0, speed: 0, sourceHeight: null });
+    });
+
+    it('still reads an absent interrupted and an absent sourceHeight as their defaults beside the new fields', () => {
+      const job = loadedJob({ referer: R, interrupted: MISSING, sourceHeight: MISSING });
+      expect(job).toMatchObject({ interrupted: false, sourceHeight: null, referer: R });
+    });
+
+    it('still accepts a file with no version beside the new fields', () => {
+      const parsed = parseSnapshotFile({ jobs: [stored({ referer: R, userAgent: UA, oneShotLogin: true })], groups: [] });
+      expect(parsed?.jobs[0]).toMatchObject({ referer: R, userAgent: UA, oneShotLogin: true });
+    });
+
+    it('still rejects version 2', () => {
+      expect(parseSnapshotFile({ version: 2, jobs: [stored({ referer: R })], groups: [] })).toBeNull();
+    });
+  });
+
+  describe('agreement with the shared validators of Task T1 (reduceReferer, isUserAgent)', () => {
+    // Needs reduceReferer and isUserAgent from src/shared/protocol.ts: they do not exist before Task T1.
+    const REFERER_POOL = [...VALID_REFERERS, ...BAD_REFERERS.filter((e): e is [string, string] => typeof e[1] === 'string'), ...REFERER_WITH_CONTROL].map(([, v]) => v);
+    const UA_POOL = [...VALID_UAS, ...BAD_UAS.filter((e): e is [string, string] => typeof e[1] === 'string'), ...UA_WITH_CONTROL].map(([, v]) => v);
+
+    it('keeps a Referer exactly when it is its own reduction (v === reduceReferer(v), plan line 155)', () => {
+      for (const referer of REFERER_POOL) {
+        const expected = reduceReferer(referer) === referer ? referer : null;
+        expect(loadedJob({ referer })?.referer, JSON.stringify(referer).slice(0, 80)).toBe(expected);
+      }
+    });
+
+    it('keeps a User-Agent exactly when isUserAgent accepts it (plan line 155)', () => {
+      for (const userAgent of UA_POOL) {
+        const expected = isUserAgent(userAgent) ? userAgent : null;
+        expect(loadedJob({ userAgent })?.userAgent, JSON.stringify(userAgent).slice(0, 80)).toBe(expected);
+      }
+    });
+
+    // M1 rests on reduceReferer (plan line 155). Through parseJob a missing clause in it would go unseen, because
+    // v === reduceReferer(v) already fails when the URL parser rewrites the bytes; so the clauses M1 relies on are
+    // pinned here as well (Task T1 owns the full table of reduceReferer, lines 180 and 192).
+    it('reduceReferer gives null for userinfo, a scheme other than http(s), a non-string and an unparsable text', () => {
+      for (const v of ['https://user@a.example/p', 'https://user:pw@a.example/p', 'ftp://a.example/p', 'javascript:alert(1)', 'file:///C:/x', '/p/q', '', 'x']) {
+        expect(reduceReferer(v), v).toBeNull();
+      }
+      for (const v of [5, null, undefined, {}, [], true]) expect(reduceReferer(v), String(v)).toBeNull();
+    });
+
+    it('reduceReferer gives null for each C0 character and DEL, wherever it stands', () => {
+      for (const [name, v] of REFERER_WITH_CONTROL) expect(reduceReferer(v), name).toBeNull();
+    });
+
+    it('reduceReferer keeps origin and pathname only: the query and the hash go', () => {
+      expect(reduceReferer('https://a.example/p/q?token=1#f')).toBe('https://a.example/p/q');
+      expect(reduceReferer('https://a.example/p?')).toBe('https://a.example/p');
+      expect(reduceReferer('https://a.example/p#')).toBe('https://a.example/p');
+    });
+
+    it('reduceReferer never returns a raw double quote: %22 or null', () => {
+      const urls = ['https://a.example/a"b', 'https://a.example/"', 'https://a.example/a%22b', 'https://a"b.example/p', 'https://"a.example/p', 'https://a.example"/p', 'https://a＂b.example/p'];
+      for (const v of urls) {
+        const reduced = reduceReferer(v);
+        expect(reduced === null || !reduced.includes('"'), v).toBe(true);
+      }
+    });
+
+    it('reduceReferer: 2048 UTF-16 units pass and 2049 give null', () => {
+      expect(reduceReferer(ORIGIN + 'a'.repeat(2048 - ORIGIN.length))).toHaveLength(2048);
+      expect(reduceReferer(ORIGIN + 'a'.repeat(2049 - ORIGIN.length))).toBeNull();
+    });
+
+    // The cap counts the REDUCED text too (src/shared/protocol.ts, REFERER_MAX), not only the input. The URL parser
+    // writes a space, a non-ASCII letter or an emoji of a path as %XX escapes, so a short input can reduce to a
+    // longer text. The lengths below are computed here from the characters, never written as a number that holds
+    // for one Node version only, and each spec first checks the sizes it relies on.
+    describe('the cap on the reduced Referer, not only on the input (REFERER_MAX = 2048)', () => {
+      const PREFIX = 'https://a.example/';
+      /** Characters the URL parser percent-encodes in a path: 1, 1 and 2 UTF-16 units before, 3, 6 and 12 after. */
+      const ENCODED: [string, string][] = [
+        ['a space', ' '],
+        ['a non-ASCII letter', 'é'],
+        ['an emoji (a surrogate pair)', '😀'],
+      ];
+
+      interface Sized {
+        input: string;
+        /** What reduceReferer must make of `input`: the escapes written out, the origin and the path kept. */
+        reduced: string;
+      }
+      /** `count` copies of `ch` and then plain letters, so that the REDUCED text has exactly `units` UTF-16 units. */
+      function sizedByReduction(ch: string, count: number, units: number): Sized {
+        const escaped = encodeURIComponent(ch);
+        const letters = 'a'.repeat(units - PREFIX.length - count * escaped.length);
+        return { input: PREFIX + ch.repeat(count) + letters, reduced: PREFIX + escaped.repeat(count) + letters };
+      }
+      /** `count` copies of `ch` and then plain letters, so that the INPUT has exactly `units` UTF-16 units. */
+      function sizedByInput(ch: string, count: number, units: number): Sized {
+        const escaped = encodeURIComponent(ch);
+        const letters = 'a'.repeat(units - PREFIX.length - count * ch.length);
+        return { input: PREFIX + ch.repeat(count) + letters, reduced: PREFIX + escaped.repeat(count) + letters };
+      }
+
+      it.each(ENCODED)('%s: an input shorter than 2048 units whose reduction is exactly 2048 is kept, is a fixed point, and loads', (_name, ch) => {
+        const { input, reduced } = sizedByReduction(ch, 20, 2048);
+        // the sizes this spec relies on
+        expect(reduced).toHaveLength(2048);
+        expect(input.length).toBeLessThanOrEqual(2048);
+        expect(input.length).toBeLessThan(reduced.length);
+        expect(reduced).toMatch(/^[\x21-\x7E]+$/u);
+
+        const r = reduceReferer(input);
+        expect(r).toBe(reduced);
+        expect(r).toHaveLength(2048);
+        expect(reduceReferer(r)).toBe(r);
+        expect(loadedJob({ referer: r })?.referer).toBe(r);
+      });
+
+      it.each(ENCODED)('%s: an input of at most 2048 units whose reduction is 2049 gives null, and so does a job that stores either text', (_name, ch) => {
+        const { input, reduced } = sizedByReduction(ch, 20, 2049);
+        expect(reduced).toHaveLength(2049);
+        expect(input.length).toBeLessThanOrEqual(2048);
+
+        expect(reduceReferer(input)).toBeNull();
+        expect(reduceReferer(reduced)).toBeNull();
+        expect(loadedJob({ referer: input })?.referer).toBeNull();
+        expect(loadedJob({ referer: reduced })?.referer).toBeNull();
+      });
+
+      it.each(ENCODED)('%s: an input of exactly 2048 units whose reduction is longer gives null', (_name, ch) => {
+        const { input, reduced } = sizedByInput(ch, 1, 2048);
+        expect(input).toHaveLength(2048);
+        expect(reduced.length).toBeGreaterThan(2048);
+
+        expect(reduceReferer(input)).toBeNull();
+        expect(loadedJob({ referer: input })?.referer).toBeNull();
+      });
+
+      // The same input, with the escapable character taken out, is a 2048-unit input that reduces to itself:
+      // the null above comes from the length of the reduction, not from the length of the input.
+      it('an input of exactly 2048 units with nothing to escape is kept, so the null of the spec above is the reduction cap', () => {
+        const input = PREFIX + 'a'.repeat(2048 - PREFIX.length);
+        expect(input).toHaveLength(2048);
+        expect(reduceReferer(input)).toBe(input);
+      });
+
+      it.each(ENCODED)('%s: a job stored with the 2048-unit fixed point keeps it across a load, a save and a second load (the real Store)', (_name, ch) => {
+        const r = sizedByReduction(ch, 20, 2048).reduced;
+        expect(r).toHaveLength(2048);
+        expect(reduceReferer(r)).toBe(r);
+
+        const dir = mkdtempSync(join(tmpdir(), 'fetchly-validate-'));
+        try {
+          const job = makeJob({ id: 'j1', state: 'queued', referer: r, userAgent: null, oneShotLogin: false });
+          writeFileSync(join(dir, 'jobs.json'), JSON.stringify({ version: 1, jobs: [job], groups: [] }));
+
+          const store = new Store(dir, 'C:\\Users\\me\\Downloads');
+          const first = store.load();
+          expect(first.recoveredCorrupt).toBeNull();
+          expect(first.snapshot.jobs).toHaveLength(1);
+          expect(first.snapshot.jobs[0]?.referer).toBe(r);
+
+          store.saveSnapshot(first.snapshot);
+          const saved = JSON.parse(readFileSync(join(dir, 'jobs.json'), 'utf8')) as { jobs: { referer: unknown }[] };
+          expect(saved.jobs[0]?.referer).toBe(r);
+
+          const second = new Store(dir, 'C:\\Users\\me\\Downloads').load();
+          expect(second.recoveredCorrupt).toBeNull();
+          expect(second.snapshot.jobs).toHaveLength(1);
+          expect(second.snapshot.jobs[0]?.referer).toBe(r);
+          expect(readdirSync(dir).filter((f) => f.includes('.corrupt-'))).toEqual([]);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      });
+    });
+
+    it('whatever reduceReferer returns is printable ASCII with no quote, and is its own reduction', () => {
+      for (const v of REFERER_POOL) {
+        const reduced = reduceReferer(v);
+        if (reduced === null) continue;
+        expect(reduced, v).toMatch(/^[\x21-\x7E]+$/u);
+        expect(reduced.includes('"'), v).toBe(false);
+        expect(reduceReferer(reduced), v).toBe(reduced);
+      }
+    });
+
+    it('the pools hold both kinds, so the two checks above are not vacuous', () => {
+      expect(REFERER_POOL.filter((v) => reduceReferer(v) === v).length).toBeGreaterThan(5);
+      expect(REFERER_POOL.filter((v) => reduceReferer(v) !== v).length).toBeGreaterThan(50);
+      expect(UA_POOL.filter((v) => isUserAgent(v)).length).toBeGreaterThan(5);
+      expect(UA_POOL.filter((v) => !isUserAgent(v)).length).toBeGreaterThan(50);
+    });
   });
 });
 

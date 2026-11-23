@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_SETTINGS, normalizeSettings, Store } from '../../src/main/jobs/store';
 import { normalizeSettings as normalizeSettingsOfValidate } from '../../src/main/jobs/validate';
 import type { Group } from '../../src/shared/types';
-import { makeJob, makeSettings } from '../helpers';
+import { makeA3Job, makeJob, makeSettings } from '../helpers';
 
 let dir: string;
 const DOWNLOADS = 'C:\\Users\\me\\Downloads';
@@ -280,6 +280,270 @@ describe('Store', () => {
   it('exports the function validate.ts defines for the settings limits (A8)', () => {
     expect(normalizeSettings).toBe(normalizeSettingsOfValidate);
     expect(normalizeSettings(makeSettings({ maxConcurrent: 50, speedLimitKbps: -5 }))).toMatchObject({ maxConcurrent: 8, speedLimitKbps: 0 });
+  });
+
+  /**
+   * M1 (A3, plan 3.2): Job gains referer, userAgent and oneShotLogin; jobs.json stays at version 1 and no
+   * conversion runs. These specs use the real Store and real files, never a mock.
+   */
+  describe('the M1 migration of jobs.json (A3)', () => {
+    const FIXTURES = join(__dirname, '..', 'fixtures');
+    const FIXTURE_NAMES = ['jobs-phase1.json', 'jobs-first-version.json', 'jobs-no-version.json'] as const;
+    const NEW_KEYS = ['referer', 'userAgent', 'oneShotLogin'] as const;
+    const NEUTRAL = { referer: null, userAgent: null, oneShotLogin: false };
+    const R = 'https://a.example/p/q';
+    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/158.0.0.0 Safari/537.36';
+    const jobsPath = (): string => join(dir, 'jobs.json');
+
+    interface FileShape {
+      version?: number;
+      jobs: Record<string, unknown>[];
+      groups: Record<string, unknown>[];
+    }
+    const fixtureText = (name: string): string => readFileSync(join(FIXTURES, name), 'utf8');
+    const fixture = (name: string): FileShape => JSON.parse(fixtureText(name)) as FileShape;
+    const savedFile = (): FileShape => JSON.parse(readFileSync(jobsPath(), 'utf8')) as FileShape;
+    const corruptFiles = (): string[] => readdirSync(dir).filter((f) => f.includes('.corrupt-'));
+    /** What a fixture job must load as: the first-version fields it lacks at their defaults, and the three new ones. */
+    const expectedJob = (j: Record<string, unknown>): Record<string, unknown> => ({ interrupted: false, sourceHeight: null, ...j, ...NEUTRAL });
+
+    describe('the three fixtures (generated once by the pre-M1 saveSnapshot, never written by hand)', () => {
+      it.each(FIXTURE_NAMES)('%s is a file written before M1: a group, a skipped job with no url, a media job and a file job, and none of the new keys', (name) => {
+        const { jobs, groups } = fixture(name);
+        expect(groups).toHaveLength(1);
+        expect(jobs).toHaveLength(4);
+        expect(jobs.filter((j) => j['state'] === 'skipped' && j['url'] === '')).toHaveLength(1);
+        expect(jobs.filter((j) => j['kind'] === 'media' && j['state'] !== 'skipped').length).toBeGreaterThanOrEqual(1);
+        expect(jobs.filter((j) => j['kind'] === 'file')).toHaveLength(1);
+        expect(jobs.filter((j) => j['groupId'] === groups[0]?.['id']).length).toBeGreaterThanOrEqual(1);
+        for (const job of jobs) {
+          for (const key of NEW_KEYS) expect(Object.hasOwn(job, key), `${job['id']} ${key}`).toBe(false);
+        }
+      });
+
+      it('jobs-first-version.json has no interrupted and no sourceHeight on any job; the other two have both', () => {
+        for (const job of fixture('jobs-first-version.json').jobs) {
+          expect(Object.hasOwn(job, 'interrupted')).toBe(false);
+          expect(Object.hasOwn(job, 'sourceHeight')).toBe(false);
+        }
+        for (const name of ['jobs-phase1.json', 'jobs-no-version.json']) {
+          for (const job of fixture(name).jobs) {
+            expect(Object.hasOwn(job, 'interrupted'), name).toBe(true);
+            expect(Object.hasOwn(job, 'sourceHeight'), name).toBe(true);
+          }
+        }
+      });
+
+      it('jobs-no-version.json has no version key; the other two say version 1', () => {
+        expect(Object.hasOwn(fixture('jobs-no-version.json'), 'version')).toBe(false);
+        expect(fixture('jobs-phase1.json').version).toBe(1);
+        expect(fixture('jobs-first-version.json').version).toBe(1);
+      });
+
+      it.each(FIXTURE_NAMES)('%s loads through the real Store, nothing is set aside and the file is left as it was', (name) => {
+        writeFileSync(jobsPath(), fixtureText(name));
+        const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+        expect(recoveredCorrupt).toBeNull();
+        expect(corruptFiles()).toEqual([]);
+        expect(snapshot.groups).toEqual(fixture(name).groups);
+        expect(snapshot.jobs).toEqual(fixture(name).jobs.map(expectedJob));
+        expect(readFileSync(jobsPath(), 'utf8')).toBe(fixtureText(name));
+      });
+
+      it.each(FIXTURE_NAMES)('%s loads every job with referer null, userAgent null and oneShotLogin false', (name) => {
+        writeFileSync(jobsPath(), fixtureText(name));
+        const { snapshot } = new Store(dir, DOWNLOADS).load();
+        expect(snapshot.jobs).toHaveLength(4);
+        for (const job of snapshot.jobs) expect(job, job.id).toMatchObject(NEUTRAL);
+        for (const job of snapshot.jobs) {
+          for (const key of NEW_KEYS) expect(Object.hasOwn(job, key), `${job.id} ${key}`).toBe(true);
+        }
+      });
+
+      it.each(FIXTURE_NAMES)('%s saves again with the three keys on every job, still at version 1', (name) => {
+        writeFileSync(jobsPath(), fixtureText(name));
+        const store = new Store(dir, DOWNLOADS);
+        const { snapshot } = store.load();
+        store.saveSnapshot(snapshot);
+        const saved = savedFile();
+        expect(saved.version).toBe(1);
+        expect(saved.jobs).toHaveLength(4);
+        for (const job of saved.jobs) {
+          for (const key of NEW_KEYS) expect(Object.hasOwn(job, key), `${job['id']} ${key}`).toBe(true);
+          expect(job, String(job['id'])).toMatchObject(NEUTRAL);
+        }
+        expect(saved.jobs).toEqual(fixture(name).jobs.map(expectedJob));
+        expect(saved.groups).toEqual(fixture(name).groups);
+        // and the new file loads again, to the same list
+        expect(new Store(dir, DOWNLOADS).load()).toMatchObject({ snapshot, recoveredCorrupt: null });
+      });
+
+      it('the phase 1 fixture and its next save differ by exactly the three keys on each job', () => {
+        writeFileSync(jobsPath(), fixtureText('jobs-phase1.json'));
+        const store = new Store(dir, DOWNLOADS);
+        store.saveSnapshot(store.load().snapshot);
+        const withoutNew = savedFile().jobs.map((j) => {
+          const copy = { ...j };
+          for (const key of NEW_KEYS) delete copy[key];
+          return copy;
+        });
+        expect(withoutNew).toEqual(fixture('jobs-phase1.json').jobs);
+      });
+    });
+
+    describe('values the new fields hold survive a save and a load', () => {
+      const group: Group = { id: 'g1', title: 'Course', url: 'https://example.com/list', dir: 'D:\\Dl\\Course', createdAt: 1 };
+
+      it('keeps a Referer, a User-Agent and oneShotLogin true across a save and a load', () => {
+        const job = makeA3Job({ referer: R, userAgent: UA, oneShotLogin: true, state: 'queued' });
+        new Store(dir, DOWNLOADS).saveSnapshot({ jobs: [job], groups: [] });
+        const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+        expect(recoveredCorrupt).toBeNull();
+        expect(snapshot.jobs).toEqual([job]);
+        expect(savedFile().jobs[0]).toMatchObject({ referer: R, userAgent: UA, oneShotLogin: true });
+      });
+
+      it('a job with oneShotLogin true and a groupId loads and saves unchanged (A3-Q16: parseJob does not cross-check)', () => {
+        const job = makeA3Job({ id: 'j1', groupId: 'g1', index: 1, state: 'queued', referer: R, userAgent: UA, oneShotLogin: true });
+        const content = JSON.stringify({ version: 1, jobs: [job], groups: [group] });
+        writeFileSync(jobsPath(), content);
+        const store = new Store(dir, DOWNLOADS);
+        const { snapshot, recoveredCorrupt } = store.load();
+        expect(recoveredCorrupt).toBeNull();
+        expect(corruptFiles()).toEqual([]);
+        expect(snapshot).toEqual({ jobs: [job], groups: [group] });
+        store.saveSnapshot(snapshot);
+        expect(savedFile()).toEqual({ version: 1, jobs: [job], groups: [group] });
+        expect(readFileSync(jobsPath(), 'utf8')).toBe(content);
+      });
+
+      it('a lone job with oneShotLogin true, as an A5 build would write it, loads and saves unchanged (B5)', () => {
+        const job = makeA3Job({ id: 'j1', kind: 'file', quality: null, baseName: null, fileName: 'a.zip', state: 'paused', referer: null, userAgent: null, oneShotLogin: true });
+        writeFileSync(jobsPath(), JSON.stringify({ version: 1, jobs: [job], groups: [] }));
+        const store = new Store(dir, DOWNLOADS);
+        const { snapshot, recoveredCorrupt } = store.load();
+        expect(recoveredCorrupt).toBeNull();
+        expect(snapshot.jobs).toEqual([job]);
+        store.saveSnapshot(snapshot);
+        expect(savedFile().jobs).toEqual([job]);
+      });
+
+      it.each(['probing', 'downloading', 'merging'] as const)('a job saved as %s loads as paused and cut off, and keeps all three fields', (state) => {
+        const store = new Store(dir, DOWNLOADS);
+        store.saveSnapshot({ jobs: [makeA3Job({ state, speed: 900, eta: 12, referer: R, userAgent: UA, oneShotLogin: true })], groups: [] });
+        const [job] = store.load().snapshot.jobs;
+        expect(job).toMatchObject({ state: 'paused', interrupted: true, referer: R, userAgent: UA, oneShotLogin: true });
+      });
+
+      it('a job that is not paused loses interrupted and keeps all three fields', () => {
+        const store = new Store(dir, DOWNLOADS);
+        store.saveSnapshot({ jobs: [makeA3Job({ state: 'done', fileName: 'a.mp4', interrupted: true, referer: R, userAgent: UA, oneShotLogin: true })], groups: [] });
+        expect(store.load().snapshot.jobs[0]).toMatchObject({ interrupted: false, referer: R, userAgent: UA, oneShotLogin: true });
+      });
+
+      it('writes no key of a job it did not read: an unknown key is not carried into the next save', () => {
+        const job = { ...makeA3Job({ state: 'queued', referer: R }), mystery: 1, handoffId: 'x' };
+        writeFileSync(jobsPath(), JSON.stringify({ version: 1, jobs: [job], groups: [] }));
+        const store = new Store(dir, DOWNLOADS);
+        store.saveSnapshot(store.load().snapshot);
+        const text = readFileSync(jobsPath(), 'utf8');
+        expect(text).not.toContain('mystery');
+        expect(text).not.toContain('handoffId');
+        expect(savedFile().jobs[0]).toMatchObject({ referer: R });
+      });
+    });
+
+    describe('a bad Referer or User-Agent loads as null: nothing is set aside (A3-Q5)', () => {
+      it('loads a Referer with a query as null, and the next save holds no query (a persisted Referer has none)', () => {
+        const job = makeA3Job({ state: 'queued', referer: 'https://a.example/p?token=SECRET#frag', userAgent: UA });
+        writeFileSync(jobsPath(), JSON.stringify({ version: 1, jobs: [job], groups: [] }));
+        const store = new Store(dir, DOWNLOADS);
+        const { snapshot, recoveredCorrupt } = store.load();
+        expect(recoveredCorrupt).toBeNull();
+        expect(corruptFiles()).toEqual([]);
+        expect(snapshot.jobs[0]).toMatchObject({ referer: null, userAgent: UA });
+        store.saveSnapshot(snapshot);
+        const text = readFileSync(jobsPath(), 'utf8');
+        expect(text).not.toContain('SECRET');
+        expect(text).not.toContain('token=');
+        expect(savedFile().jobs[0]).toMatchObject({ referer: null, userAgent: UA });
+      });
+
+      it.each([
+        ['a Referer with a double quote', { referer: 'https://a.example/a"b' }],
+        ['a Referer of the wrong type', { referer: 5 }],
+        ['a Referer of 2049 units', { referer: `https://a.example/${'a'.repeat(2049 - 'https://a.example/'.length)}` }],
+        ['a Referer with a control character', { referer: 'https://a.example/p\u0001q' }],
+        ['a User-Agent of 513 characters', { userAgent: 'a'.repeat(513) }],
+        ['a User-Agent with a carriage return', { userAgent: 'Mozilla\r\nX-Evil: 1' }],
+        ['a User-Agent of the wrong type', { userAgent: ['Mozilla'] }],
+        ['an empty User-Agent', { userAgent: '' }],
+      ])('loads %s as null, keeps the job and sets nothing aside', (_name, bad) => {
+        // `bad` holds wrong-typed values on purpose, so the job is built as a plain record, not as a Job.
+        const jobs = [{ ...makeA3Job({ id: 'a', state: 'queued' }), ...bad }, makeA3Job({ id: 'b', state: 'queued', referer: R, userAgent: UA, oneShotLogin: true })];
+        writeFileSync(jobsPath(), JSON.stringify({ version: 1, jobs, groups: [] }));
+        const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+        expect(recoveredCorrupt).toBeNull();
+        expect(corruptFiles()).toEqual([]);
+        const field = Object.keys(bad)[0] as 'referer' | 'userAgent';
+        expect(snapshot.jobs.map((j) => j.id)).toEqual(['a', 'b']);
+        expect(snapshot.jobs[0]?.[field]).toBeNull();
+        expect(snapshot.jobs[1]).toMatchObject({ referer: R, userAgent: UA, oneShotLogin: true });
+      });
+    });
+
+    describe('a oneShotLogin that is not a boolean sets the file aside, as a bad interrupted does (A3-Q5)', () => {
+      const NOT_BOOLEAN: [string, unknown][] = [
+        ['null', null],
+        ['the text "true"', 'true'],
+        ['the number 0', 0],
+        ['the number 1', 1],
+        ['an empty text', ''],
+        ['an empty list', []],
+        ['an empty object', {}],
+      ];
+
+      /** What a set-aside looks like, for whichever field was bad. */
+      function expectSetAside(content: string): void {
+        const { snapshot, recoveredCorrupt } = new Store(dir, DOWNLOADS).load();
+        expect(snapshot).toEqual({ jobs: [], groups: [] });
+        expect(recoveredCorrupt).toMatch(/jobs\.json\.corrupt-\d+$/);
+        expect(corruptFiles()).toHaveLength(1);
+        expect(readFileSync(recoveredCorrupt as string, 'utf8')).toBe(content);
+        expect(existsSync(jobsPath())).toBe(false);
+      }
+
+      it.each(NOT_BOOLEAN)('oneShotLogin %s: the file is renamed to .corrupt-<ts>, byte for byte, and the list starts empty', (_name, oneShotLogin) => {
+        const content = JSON.stringify({ version: 1, jobs: [{ ...makeA3Job({ state: 'paused' }), oneShotLogin }], groups: [] });
+        writeFileSync(jobsPath(), content);
+        expectSetAside(content);
+      });
+
+      it('the same path as a bad interrupted: both leave the same kind of set-aside file', () => {
+        const bad = JSON.stringify({ version: 1, jobs: [{ ...makeA3Job({ state: 'paused' }), interrupted: null }], groups: [] });
+        writeFileSync(jobsPath(), bad);
+        expectSetAside(bad);
+      });
+
+      it('sets the file aside even when every other job in it is fine, and nothing is deleted', () => {
+        const jobs = [makeA3Job({ id: 'a', state: 'queued', referer: R }), { ...makeA3Job({ id: 'b', state: 'queued' }), oneShotLogin: 'yes' }, makeA3Job({ id: 'c', state: 'queued' })];
+        const content = JSON.stringify({ version: 1, jobs, groups: [] });
+        writeFileSync(jobsPath(), content);
+        expectSetAside(content);
+      });
+
+      it('a later start finds no file, and a save afterwards keeps the set-aside file', () => {
+        const content = JSON.stringify({ version: 1, jobs: [{ ...makeA3Job({ state: 'paused' }), oneShotLogin: null }], groups: [] });
+        writeFileSync(jobsPath(), content);
+        const first = new Store(dir, DOWNLOADS).load();
+        const aside = first.recoveredCorrupt as string;
+        const store = new Store(dir, DOWNLOADS);
+        expect(store.load()).toMatchObject({ snapshot: { jobs: [], groups: [] }, recoveredCorrupt: null });
+        store.saveSnapshot({ jobs: [makeA3Job({ state: 'queued' })], groups: [] });
+        expect(readFileSync(aside, 'utf8')).toBe(content);
+        expect(store.load().recoveredCorrupt).toBeNull();
+      });
+    });
   });
 
   it('sets aside a jobs file whose job lacks required fields', () => {

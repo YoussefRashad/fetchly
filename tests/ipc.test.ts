@@ -1635,7 +1635,7 @@ describe('C2: quality is rebuilt before it leaves IPC (handlers with fakes)', ()
     expect(added).toHaveLength(1);
     expect(added[0]?.quality).toStrictEqual(declared);
     expect(added[0]?.quality).not.toBe(bad);
-    expect(added[0]).toStrictEqual({ url: 'https://example.com/v', probe: media, quality: declared, subtitleLangs: [], dir, selectedIndexes: null });
+    expect(added[0]).toStrictEqual({ url: 'https://example.com/v', probe: media, quality: declared, subtitleLangs: [], dir, selectedIndexes: null, referer: null, userAgent: null, oneShotLogin: false });
   });
 
   it.each(QUALITY_ROWS)('a %s quality with %s on a playlist request: queue.add receives the declared fields only', async (_kind, _extra, base, make, declared) => {
@@ -1867,6 +1867,114 @@ describe('C3: a url with a control character never reaches the queue or a spawn 
       const entries = [entryOf({ url: 'https://example.com/v/1\u0000' }), entryOf({ index: 2, url: 'a\u0000b', unavailable: true, reason: 'removed' })];
       expect(await handlers().add(listRequest(entries))).toEqual(BAD);
       expect(added).toEqual([]);
+    });
+  });
+});
+
+/**
+ * M1 (A3, plan 3.2): the `add` rebuild in ipc.ts passes referer null, userAgent null and oneShotLogin false.
+ * Nothing the window sends can change them (M2 adds the hand-off path later; this is "handoffId absent").
+ */
+describe('add passes referer null, userAgent null and oneShotLogin false (A3, M1)', () => {
+  const NEUTRAL = { referer: null, userAgent: null, oneShotLogin: false };
+  const NEW_KEYS = ['referer', 'userAgent', 'oneShotLogin'] as const;
+  const gone = () => entryOf({ index: 2, url: '', unavailable: true, reason: 'private' });
+
+  const REQUESTS: [string, () => AddRequest][] = [
+    ['a video', () => request()],
+    ['a video with a quality and subtitles', () => request({ quality: { kind: 'max', height: 720 }, subtitleLangs: ['en'] })],
+    ['a file', () => fileRequest()],
+    ['a playlist', () => listRequest([entryOf(), entryOf({ index: 2, url: 'https://example.com/v/2' })])],
+    ['a playlist with a selection', () => listRequest(threeEntries(), [1, 3])],
+    ['a playlist with an unavailable entry', () => listRequest([entryOf(), gone()])],
+  ];
+
+  it.each(REQUESTS)('%s: queue.add gets null, null and false, as own keys', async (_name, make) => {
+    expect(await createHandlers(deps()).add(make())).toEqual(ACCEPTED);
+    expect(added).toHaveLength(1);
+    expect(added[0]).toMatchObject(NEUTRAL);
+    for (const key of NEW_KEYS) expect(Object.hasOwn(added[0] as object, key), key).toBe(true);
+  });
+
+  it('hands queue.add exactly the old fields and the three new ones, nothing else', async () => {
+    expect(await createHandlers(deps()).add(request())).toEqual(ACCEPTED);
+    expect(added[0]).toStrictEqual({
+      url: 'https://example.com/v',
+      probe: media,
+      quality: { kind: 'best' },
+      subtitleLangs: [],
+      dir,
+      selectedIndexes: null,
+      referer: null,
+      userAgent: null,
+      oneShotLogin: false,
+    });
+  });
+
+  it('hands queue.add the same three values for a playlist, with the selection it checked', async () => {
+    expect(await createHandlers(deps()).add(listRequest(threeEntries(), [1, 3]))).toEqual(ACCEPTED);
+    expect(added[0]).toMatchObject({ ...NEUTRAL, selectedIndexes: [1, 3] });
+  });
+
+  it.each([
+    ['a Referer', { referer: 'https://evil.example/p' }],
+    ['a User-Agent', { userAgent: 'Evil/1.0' }],
+    ['oneShotLogin true', { oneShotLogin: true }],
+    ['all three', { referer: 'https://evil.example/p', userAgent: 'Evil/1.0', oneShotLogin: true }],
+    ['a Referer with a query', { referer: 'https://evil.example/p?token=1' }],
+    ['a User-Agent with a line break', { userAgent: 'Evil\r\nX-Injected: 1' }],
+  ])('ignores %s in the request from the window: only main supplies these', async (_name, extra) => {
+    const h = createHandlers(deps());
+    expect(await h.add({ ...request(), ...extra } as AddRequest)).toEqual(ACCEPTED);
+    expect(await h.add({ ...fileRequest(), ...extra } as AddRequest)).toEqual(ACCEPTED);
+    expect(await h.add({ ...listRequest([entryOf()]), ...extra } as AddRequest)).toEqual(ACCEPTED);
+    expect(added).toHaveLength(3);
+    for (const req of added) expect(req).toMatchObject(NEUTRAL);
+  });
+
+  it('adds nothing, and passes nothing, when the request is refused', async () => {
+    expect(await createHandlers(deps()).add({ ...request({ dir: 'downloads' }), oneShotLogin: true } as AddRequest)).toMatchObject({ ok: false });
+    expect(added).toEqual([]);
+  });
+
+  describe('with the real Queue and Store', () => {
+    const DOWNLOADS = 'C:\\Users\\me\\Downloads';
+    let dataDir: string;
+
+    beforeEach(() => {
+      dataDir = mkdtempSync(join(tmpdir(), 'fetchly-ipc-m1-'));
+    });
+    afterEach(() => {
+      rmSync(dataDir, { recursive: true, force: true });
+    });
+
+    it('stores null, null and false on a video, a file and every playlist item, and the saved file loads again', async () => {
+      const queue = new Queue({
+        store: new Store(dataDir, DOWNLOADS),
+        media: new FakeEngine(),
+        file: new FakeEngine(),
+        initial: { jobs: [], groups: [] },
+        settings: makeSettings({ downloadDir: dir }),
+        straysCleared: true,
+        setTimer: () => undefined,
+      });
+      const h = createHandlers({ ...deps(), queue: () => queue });
+      const hostile = { referer: 'https://evil.example/p', userAgent: 'Evil/1.0', oneShotLogin: true };
+      expect(await h.add({ ...request(), ...hostile } as AddRequest)).toEqual(ACCEPTED);
+      expect(await h.add({ ...fileRequest(), ...hostile } as AddRequest)).toEqual(ACCEPTED);
+      expect(await h.add({ ...listRequest([entryOf(), gone()]), ...hostile } as AddRequest)).toEqual(ACCEPTED);
+
+      const inQueue = queue.snapshot();
+      expect(inQueue.jobs).toHaveLength(4);
+      for (const job of inQueue.jobs) expect(job, job.id).toMatchObject(NEUTRAL);
+
+      const { snapshot, recoveredCorrupt } = new Store(dataDir, DOWNLOADS).load();
+      expect(recoveredCorrupt).toBeNull();
+      expect(snapshot.jobs.map((j) => j.id)).toEqual(inQueue.jobs.map((j) => j.id));
+      for (const job of snapshot.jobs) expect(job, job.id).toMatchObject(NEUTRAL);
+      const text = readFileSync(join(dataDir, 'jobs.json'), 'utf8');
+      expect(text).not.toContain('evil.example');
+      expect(text).not.toContain('Evil/1.0');
     });
   });
 });

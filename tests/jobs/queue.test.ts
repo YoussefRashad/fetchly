@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Engine, EngineEvent, EngineListener, StartContext } from '../../src/main/engines/engine';
 import { Queue, RETRY_DELAYS_MS, SAVE_RETRY_MS } from '../../src/main/jobs/queue';
+import type { QueueAdd } from '../../src/main/jobs/queue';
 import type { Store } from '../../src/main/jobs/store';
 import { parseSnapshotFile } from '../../src/main/jobs/validate';
 import type { AddRequest, EntryReason, Group, Job, JobState, PlaylistEntry, Settings, Snapshot } from '../../src/shared/types';
@@ -109,13 +110,14 @@ function fire(ms: number): void {
   for (const t of due) t.fn();
 }
 
-const video = (title = 'Talk', url = 'https://example.com/v'): AddRequest => ({
+const video = (title = 'Talk', url = 'https://example.com/v'): QueueAdd => ({
   url,
   probe: { kind: 'media', title, thumbnail: null, heights: [1080] },
   quality: { kind: 'max', height: 720 },
   subtitleLangs: [],
   dir,
   selectedIndexes: null,
+  referer: null, userAgent: null, oneShotLogin: false,
 });
 
 const entries = (n: number, unavailable: number[] = []): PlaylistEntry[] =>
@@ -127,22 +129,24 @@ const entries = (n: number, unavailable: number[] = []): PlaylistEntry[] =>
     reason: unavailable.includes(i + 1) ? ('unavailable' as const) : null,
   }));
 
-const playlist = (n: number, opts: { unavailable?: number[]; selected?: number[] | null; title?: string } = {}): AddRequest => ({
+const playlist = (n: number, opts: { unavailable?: number[]; selected?: number[] | null; title?: string } = {}): QueueAdd => ({
   url: 'https://example.com/list',
   probe: { kind: 'playlist', title: opts.title ?? 'React: Course?', entries: entries(n, opts.unavailable) },
   quality: { kind: 'best' },
   subtitleLangs: ['en'],
   dir,
   selectedIndexes: opts.selected ?? null,
+  referer: null, userAgent: null, oneShotLogin: false,
 });
 
-const fileReq = (fileName = 'a.zip', resumable = true): AddRequest => ({
+const fileReq = (fileName = 'a.zip', resumable = true): QueueAdd => ({
   url: 'https://example.com/a.zip',
   probe: { kind: 'file', fileName, size: 5000, resumable },
   quality: null,
   subtitleLangs: [],
   dir,
   selectedIndexes: null,
+  referer: null, userAgent: null, oneShotLogin: false,
 });
 
 const states = (q: Queue) => q.snapshot().jobs.map((j) => j.state);
@@ -329,6 +333,219 @@ describe('adding', () => {
     const q = build();
     q.add(fileReq());
     expect(jobAt(q, 0).fileName).toBe('a (2).zip');
+  });
+});
+
+/**
+ * M1 (A3, plan 3.2): Queue.add writes referer, userAgent and oneShotLogin on a file job, a media job and every
+ * playlist item. Group items inherit referer and userAgent and always get oneShotLogin false (A3-Q6). The values
+ * are stored as given (the route and ipc check them); an A3 caller passes oneShotLogin false.
+ */
+describe('adding: referer, userAgent and oneShotLogin (A3, M1)', () => {
+  /** Whatever Queue.add takes once M1 is in; AddRequest before it. */
+  type QueueAddArg = Parameters<Queue['add']>[0];
+  interface Fields {
+    referer: string | null;
+    userAgent: string | null;
+    oneShotLogin: boolean;
+  }
+  const R = 'https://a.example/p/q';
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/158.0.0.0 Safari/537.36';
+  const SET: Fields = { referer: R, userAgent: UA, oneShotLogin: false };
+  const NEUTRAL: Fields = { referer: null, userAgent: null, oneShotLogin: false };
+  const NEW_KEYS = ['referer', 'userAgent', 'oneShotLogin'] as const;
+  const withFields = (req: AddRequest, fields: Fields): QueueAddArg => ({ ...req, ...fields });
+  const members = (q: Queue): Job[] => q.snapshot().jobs.filter((j) => j.groupId !== null);
+
+  describe('a media job', () => {
+    it('writes the Referer, the User-Agent and oneShotLogin false', () => {
+      const q = build();
+      q.add(withFields(video(), SET));
+      expect(jobAt(q, 0)).toMatchObject({ kind: 'media', ...SET });
+    });
+
+    it('writes null, null and false when that is what it is given', () => {
+      const q = build();
+      q.add(withFields(video(), NEUTRAL));
+      expect(jobAt(q, 0)).toMatchObject(NEUTRAL);
+      for (const key of NEW_KEYS) expect(Object.hasOwn(jobAt(q, 0), key), key).toBe(true);
+    });
+
+    it('stores oneShotLogin true as given on a lone job (the caller decides; A3 itself passes false)', () => {
+      const q = build();
+      q.add(withFields(video(), { ...SET, oneShotLogin: true }));
+      expect(jobAt(q, 0).oneShotLogin).toBe(true);
+    });
+
+    it('stores each of the three under its own name', () => {
+      const q = build();
+      q.add(withFields(video(), { referer: R, userAgent: 'Some Agent/1.0', oneShotLogin: true }));
+      expect(jobAt(q, 0)).toMatchObject({ referer: R, userAgent: 'Some Agent/1.0', oneShotLogin: true });
+    });
+
+    it('hands the engine a job that holds them', () => {
+      const q = build();
+      q.add(withFields(video(), SET));
+      expect(media.started[0]?.job).toMatchObject({ kind: 'media', ...SET });
+      expect(jobAt(q, 0).state).toBe('probing');
+    });
+  });
+
+  describe('a file job', () => {
+    it('writes the Referer, the User-Agent and oneShotLogin false', () => {
+      const q = build();
+      q.add(withFields(fileReq(), SET));
+      expect(jobAt(q, 0)).toMatchObject({ kind: 'file', ...SET });
+    });
+
+    it('writes null, null and false when that is what it is given', () => {
+      const q = build();
+      q.add(withFields(fileReq(), NEUTRAL));
+      expect(jobAt(q, 0)).toMatchObject({ kind: 'file', ...NEUTRAL });
+      for (const key of NEW_KEYS) expect(Object.hasOwn(jobAt(q, 0), key), key).toBe(true);
+    });
+
+    it('stores oneShotLogin true as given on a lone file job', () => {
+      const q = build();
+      q.add(withFields(fileReq(), { ...SET, oneShotLogin: true }));
+      expect(jobAt(q, 0).oneShotLogin).toBe(true);
+    });
+
+    it('hands the engine a job that holds them', () => {
+      const q = build();
+      q.add(withFields(fileReq(), SET));
+      expect(file.started[0]?.job).toMatchObject({ kind: 'file', ...SET });
+    });
+  });
+
+  describe('a playlist', () => {
+    it('gives every item the Referer and the User-Agent of the request, and oneShotLogin false', () => {
+      const q = build({ maxConcurrent: 8 });
+      q.add(withFields(playlist(5), SET));
+      expect(members(q)).toHaveLength(5);
+      for (const job of members(q)) expect(job, `item ${job.index}`).toMatchObject(SET);
+    });
+
+    it('never gives a group item oneShotLogin true, whatever the request says', () => {
+      const q = build({ maxConcurrent: 8 });
+      q.add(withFields(playlist(5), { ...SET, oneShotLogin: true }));
+      expect(members(q)).toHaveLength(5);
+      for (const job of members(q)) expect(job.oneShotLogin, `item ${job.index}`).toBe(false);
+    });
+
+    it('gives the skipped placeholders the same, so every item of the group is alike', () => {
+      const q = build({ maxConcurrent: 8 });
+      q.add(withFields(playlist(4, { unavailable: [2, 4] }), { ...SET, oneShotLogin: true }));
+      const items = members(q);
+      expect(items.map((j) => j.state)).toEqual(['probing', 'skipped', 'probing', 'skipped']);
+      for (const job of items) expect(job, `item ${job.index}`).toMatchObject({ referer: R, userAgent: UA, oneShotLogin: false });
+    });
+
+    it('does so for a selection of some items too', () => {
+      const q = build({ maxConcurrent: 8 });
+      q.add(withFields(playlist(6, { selected: [2, 5], unavailable: [3] }), { ...SET, oneShotLogin: true }));
+      expect(members(q).map((j) => j.index)).toEqual([2, 3, 5]);
+      for (const job of members(q)) expect(job, `item ${job.index}`).toMatchObject({ referer: R, userAgent: UA, oneShotLogin: false });
+    });
+
+    it('inherits null Referer and null User-Agent as null', () => {
+      const q = build({ maxConcurrent: 8 });
+      q.add(withFields(playlist(3), NEUTRAL));
+      for (const job of members(q)) expect(job, `item ${job.index}`).toMatchObject(NEUTRAL);
+    });
+
+    it('inherits a Referer without a User-Agent, and the reverse, each alone', () => {
+      const q = build({ maxConcurrent: 8 });
+      q.add(withFields(playlist(2), { referer: R, userAgent: null, oneShotLogin: false }));
+      q.add(withFields(playlist(2, { title: 'Other' }), { referer: null, userAgent: UA, oneShotLogin: false }));
+      expect(members(q).map((j) => [j.referer, j.userAgent])).toEqual([
+        [R, null],
+        [R, null],
+        [null, UA],
+        [null, UA],
+      ]);
+    });
+
+    it('hands the engine items that hold them', () => {
+      const q = build({ maxConcurrent: 8 });
+      q.add(withFields(playlist(3), { ...SET, oneShotLogin: true }));
+      expect(media.started).toHaveLength(3);
+      for (const { job } of media.started) expect(job).toMatchObject(SET);
+    });
+
+    it('leaves the group itself with its own five fields', () => {
+      const q = build();
+      q.add(withFields(playlist(3), { ...SET, oneShotLogin: true }));
+      expect(Object.keys(groupAt(q)).sort()).toEqual(['createdAt', 'dir', 'id', 'title', 'url']);
+    });
+  });
+
+  describe('no group item has oneShotLogin true, across adds', () => {
+    it('a lone job with oneShotLogin true keeps it, and the playlist added after it still gets false', () => {
+      const q = build({ maxConcurrent: 8 });
+      q.add(withFields(video('Lone'), { ...SET, oneShotLogin: true }));
+      q.add(withFields(playlist(3), { ...SET, oneShotLogin: true }));
+      const { jobs } = q.snapshot();
+      expect(jobs[0]).toMatchObject({ groupId: null, oneShotLogin: true });
+      expect(jobs.filter((j) => j.groupId !== null).map((j) => j.oneShotLogin)).toEqual([false, false, false]);
+    });
+
+    it('a lone job added after a playlist is not changed by it', () => {
+      const q = build({ maxConcurrent: 8 });
+      q.add(withFields(playlist(2), { ...SET, oneShotLogin: true }));
+      q.add(withFields(fileReq(), { referer: null, userAgent: null, oneShotLogin: true }));
+      const jobs = q.snapshot().jobs;
+      expect(jobs.map((j) => [j.groupId === null ? 'lone' : 'group', j.oneShotLogin])).toEqual([
+        ['group', false],
+        ['group', false],
+        ['lone', true],
+      ]);
+    });
+  });
+
+  describe('the list on disk', () => {
+    it('saves the three fields of every job and the saved list loads again to the same jobs', () => {
+      const q = build({ maxConcurrent: 8 });
+      q.add(withFields(video(), SET));
+      q.add(withFields(fileReq(), { ...SET, oneShotLogin: true }));
+      q.add(withFields(playlist(3, { unavailable: [2] }), { ...SET, oneShotLogin: true }));
+      const last = saves.at(-1);
+      expect(last?.jobs).toHaveLength(5);
+      for (const job of last?.jobs ?? []) {
+        for (const key of NEW_KEYS) expect(Object.hasOwn(job, key), `${job.id} ${key}`).toBe(true);
+      }
+      expect(loadedLastSave()).not.toBeNull();
+      expect(loadedLastSave()?.jobs).toEqual(q.snapshot().jobs);
+    });
+
+    it('saves null, null and false for a job added with them', () => {
+      const q = build();
+      q.add(withFields(video(), NEUTRAL));
+      expect(loadedLastSave()?.jobs[0]).toMatchObject(NEUTRAL);
+    });
+  });
+
+  describe('a job keeps the three fields through its life', () => {
+    it('through progress, pause, resume and a retry wait', async () => {
+      const q = build();
+      q.add(withFields(video(), { ...SET, oneShotLogin: true }));
+      const id = jobAt(q, 0).id;
+      const holds = (): void => expect(jobAt(q, 0), jobAt(q, 0).state).toMatchObject({ ...SET, oneShotLogin: true });
+
+      media.emit(progress(id));
+      holds();
+      expect(await q.job(id, 'pause')).toEqual(OK);
+      holds();
+      expect(await q.job(id, 'resume')).toEqual(OK);
+      holds();
+      media.emit(error(id, 'connection reset', true));
+      expect(jobAt(q, 0).state).toBe('queued');
+      holds();
+      fire(RETRY_DELAYS_MS[0] as number);
+      holds();
+      expect(media.started.at(-1)?.job).toMatchObject({ ...SET, oneShotLogin: true });
+      expect(loadedLastSave()?.jobs[0]).toMatchObject({ ...SET, oneShotLogin: true });
+    });
   });
 });
 
@@ -904,7 +1121,7 @@ describe('Queue.add keeps no array rule of its own (B2, spec 7.8)', () => {
 
   it.each(ROWS)('still adds a video whose probe lists heights with %s: the checks are the handler\'s', (_label, heights) => {
     const q = build();
-    const req = { ...video(), probe: { kind: 'media', title: 'Talk', thumbnail: null, heights } } as unknown as AddRequest;
+    const req = { ...video(), probe: { kind: 'media', title: 'Talk', thumbnail: null, heights } } as unknown as QueueAdd;
     expect(() => q.add(req)).not.toThrow();
     expect(q.snapshot().jobs).toHaveLength(1);
     expect(jobAt(q, 0)).toMatchObject({ kind: 'media', state: 'probing', title: 'Talk' });
@@ -1520,7 +1737,7 @@ describe('a stop that is not confirmed (7.2)', () => {
   const KINDS = ['media', 'file'] as const;
   type Kind = (typeof KINDS)[number];
   const engineOf = (kind: Kind): FakeEngine => (kind === 'media' ? media : file);
-  const request = (kind: Kind, n: number): AddRequest => (kind === 'media' ? video(`Video ${n}`) : fileReq(`file${n}.zip`));
+  const request = (kind: Kind, n: number): QueueAdd => (kind === 'media' ? video(`Video ${n}`) : fileReq(`file${n}.zip`));
 
   /** maxConcurrent 1 and two jobs of the kind: the first runs and holds the only slot, the second waits. */
   function twoJobs(kind: Kind): { q: Queue; first: string; second: string } {
@@ -1704,7 +1921,7 @@ describe('a stop that is not confirmed (7.2)', () => {
 
 describe('the retry wait token (7.3)', () => {
   const KINDS = ['media', 'file'] as const;
-  const request = (kind: (typeof KINDS)[number]): AddRequest => (kind === 'media' ? video() : fileReq());
+  const request = (kind: (typeof KINDS)[number]): QueueAdd => (kind === 'media' ? video() : fileReq());
   const retryable = (id: string): EngineEvent => error(id, 'HTTP Error 503', true);
 
   it('an old retry timer cannot release a newer wait', async () => {
@@ -1772,7 +1989,7 @@ describe('the retry wait token (7.3)', () => {
 describe('transition, save, then start; save failures (7.4)', () => {
   const KINDS = ['media', 'file'] as const;
   type Kind = (typeof KINDS)[number];
-  const request = (kind: Kind): AddRequest => (kind === 'media' ? video() : fileReq());
+  const request = (kind: Kind): QueueAdd => (kind === 'media' ? video() : fileReq());
   const retryTimers = (): Timer[] => timers.filter((t) => t.ms === SAVE_RETRY);
 
   /** What the last save held for the starting job at the moment each start of `engine` happened. */
@@ -3050,9 +3267,9 @@ describe('jobs cut off by a crash (7.7)', () => {
 
 describe('adding: one namespace, placeholders, real height (7.8)', () => {
   const names = (q: Queue): (string | null)[] => q.snapshot().jobs.map((j) => j.baseName ?? j.fileName);
-  const videoIn = (title: string, where: string): AddRequest => ({ ...video(title), dir: where });
-  const fileIn = (fileName: string, where: string): AddRequest => ({ ...fileReq(fileName), dir: where });
-  const videoWith = (heights: number[]): AddRequest => ({ ...video(), probe: { kind: 'media', title: 'Talk', thumbnail: null, heights } });
+  const videoIn = (title: string, where: string): QueueAdd => ({ ...video(title), dir: where });
+  const fileIn = (fileName: string, where: string): QueueAdd => ({ ...fileReq(fileName), dir: where });
+  const videoWith = (heights: number[]): QueueAdd => ({ ...video(), probe: { kind: 'media', title: 'Talk', thumbnail: null, heights } });
   const onDisk = (...files: string[]): void => {
     for (const name of files) writeFileSync(join(dir, name), 'existing');
   };

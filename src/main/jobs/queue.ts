@@ -76,6 +76,18 @@ export interface QueueDeps {
   setTimer?: (fn: () => void, ms: number) => unknown;
 }
 
+/**
+ * What Queue.add takes: an AddRequest the caller has checked, plus three fields only main supplies. All three
+ * are required, so no caller can forget them. referer and userAgent are stored as given: they must already
+ * satisfy reduceReferer (equal to their own reduction) and isUserAgent, or be null.
+ */
+export interface QueueAdd extends AddRequest {
+  referer: string | null;
+  userAgent: string | null;
+  /** Stored as given on a lone job; a playlist item always gets false. */
+  oneShotLogin: boolean;
+}
+
 const TERMINAL = new Set(['done', 'failed', 'skipped']);
 
 /** The names already used in one folder during one `add` call. */
@@ -164,10 +176,13 @@ export class Queue {
     this.retune();
   }
 
-  add(req: AddRequest): void {
+  add(req: QueueAdd): void {
     const createdAt = this.now();
     const base = {
       url: req.url,
+      referer: req.referer,
+      userAgent: req.userAgent,
+      oneShotLogin: req.oneShotLogin,
       state: 'queued' as const,
       reason: null,
       subtitleLangs: req.subtitleLangs,
@@ -255,6 +270,8 @@ export class Queue {
           // A skipped placeholder holds no name.
           baseName: name(group.dir, itemBaseName(entry.title, entry.index, total), '', !entry.unavailable),
           index: entry.index,
+          // Items inherit referer and userAgent from base; a sign-in held for one run is never given to a group.
+          oneShotLogin: false,
         });
       }
       if (added > 0) this.groups.push(group);

@@ -4,6 +4,8 @@
  * it has no Node imports.
  */
 
+import { CONTROL } from './text';
+
 export const PROTOCOL = 1;
 
 /** The port the server listens on when settings.json holds none, or an invalid one (never clamped). */
@@ -40,6 +42,41 @@ export const MAX_PAIRINGS = 4;
 
 /** proofKey = HMAC-SHA256(key = the token's ASCII bytes, message = this text). */
 export const PROOF_KEY_LABEL = 'fetchly-server-proof-v1';
+
+/** The longest Referer, in UTF-16 code units, before and after reduceReferer. */
+export const REFERER_MAX = 2048;
+/** The longest User-Agent, in characters (all ASCII, so also UTF-16 units and bytes). */
+export const UA_MAX = 512;
+
+const PRINTABLE_NO_SPACE = /^[\x21-\x7E]+$/u;
+const PRINTABLE = /^[\x20-\x7E]+$/u;
+
+/**
+ * The Referer A3 sends and stores: origin + pathname of an http(s) URL, so no query, no hash and no userinfo.
+ * null for a non-string, more than REFERER_MAX UTF-16 units, a control character, an unparsable text, a scheme
+ * other than http(s), or userinfo; and when the result is longer than REFERER_MAX, is not printable ASCII without
+ * spaces, or holds a `"` (aria2 rewrites it, PA3-6b). Never throws. A stored value is valid when it equals its own
+ * reduction.
+ */
+export function reduceReferer(raw: unknown): string | null {
+  if (typeof raw !== 'string' || raw.length > REFERER_MAX || CONTROL.test(raw)) return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  if (url.username !== '' || url.password !== '') return null;
+  const reduced = url.origin + url.pathname;
+  if (reduced.length > REFERER_MAX || !PRINTABLE_NO_SPACE.test(reduced) || reduced.includes('"')) return null;
+  return reduced;
+}
+
+/** A User-Agent A3 accepts: 1 to UA_MAX characters, each printable ASCII (U+0020 to U+007E). Never throws. */
+export function isUserAgent(v: unknown): v is string {
+  return typeof v === 'string' && v.length >= 1 && v.length <= UA_MAX && PRINTABLE.test(v);
+}
 
 /** Bidirectional formatting characters: U+200E, U+200F, U+202A..U+202E, U+2066..U+2069. */
 export const BIDI = /[‎‏‪-‮⁦-⁩]/u;

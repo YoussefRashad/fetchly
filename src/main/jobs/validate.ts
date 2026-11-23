@@ -1,5 +1,5 @@
 import { win32 } from 'node:path';
-import { DEFAULT_SERVER_PORT, isServerPort } from '../../shared/protocol';
+import { DEFAULT_SERVER_PORT, isServerPort, isUserAgent, reduceReferer } from '../../shared/protocol';
 import { CONTROL } from '../../shared/text';
 import { isLanguageSetting, isThemeSetting } from '../../shared/i18n';
 import { HEIGHTS, type Group, type Job, type JobKind, type JobState, type Quality, type Settings, type Snapshot } from '../../shared/types';
@@ -105,6 +105,10 @@ export function isUsableDoneName(v: unknown): v is string {
 const meter = (v: unknown): number | null => (isNonNegative(v) ? v : null);
 /** A height: finite and > 0. */
 const height = (v: unknown): number | null => (isPositive(v) ? v : null);
+/** A stored Referer: kept only when it is already its own reduction (no query, no hash, no `"`), else null. */
+const storedReferer = (v: unknown): string | null => (typeof v === 'string' && reduceReferer(v) === v ? v : null);
+/** A stored User-Agent: kept only when isUserAgent accepts it, else null. */
+const storedUserAgent = (v: unknown): string | null => (isUserAgent(v) ? v : null);
 
 function parseGroup(raw: unknown): Group | null {
   if (!isPlainObject(raw)) return null;
@@ -133,6 +137,8 @@ function parseJob(raw: unknown, groupIds: ReadonlySet<string>): Job | null {
   // Added after the first version: only an absent value means the old default.
   // (JSON has no undefined, so undefined is the key being absent.)
   const interrupted = r['interrupted'] === undefined ? false : r['interrupted'];
+  // Added by A3, by the same rule: absent is false; null or any other non-boolean makes the job invalid.
+  const oneShotLogin = r['oneShotLogin'] === undefined ? false : r['oneShotLogin'];
 
   const media = kind === 'media';
   const valid =
@@ -152,6 +158,7 @@ function parseJob(raw: unknown, groupIds: ReadonlySet<string>): Job | null {
     (index === null || (Number.isInteger(index) && (index as number) >= 1)) &&
     typeof r['resumable'] === 'boolean' &&
     typeof interrupted === 'boolean' &&
+    typeof oneShotLogin === 'boolean' &&
     Number.isInteger(attempts) &&
     (attempts as number) >= 0 &&
     typeof createdAt === 'number' &&
@@ -160,7 +167,8 @@ function parseJob(raw: unknown, groupIds: ReadonlySet<string>): Job | null {
 
   // Built from known keys only, so nothing unknown is carried into the next save.
   // The meters only describe progress: a value out of range becomes its neutral value
-  // instead of setting the whole list aside.
+  // instead of setting the whole list aside. The Referer and the User-Agent follow the
+  // meters: absent, null or invalid loads as null.
   return {
     id: id as string,
     groupId: groupId as string | null,
@@ -185,6 +193,9 @@ function parseJob(raw: unknown, groupIds: ReadonlySet<string>): Job | null {
     createdAt: createdAt as number,
     interrupted: interrupted as boolean,
     sourceHeight: height(r['sourceHeight']),
+    referer: storedReferer(r['referer']),
+    userAgent: storedUserAgent(r['userAgent']),
+    oneShotLogin: oneShotLogin as boolean,
   };
 }
 
@@ -194,6 +205,9 @@ function parseJob(raw: unknown, groupIds: ReadonlySet<string>): Job | null {
  * Groups without members are dropped. A file of the first version, without the
  * fields added since, is valid. The six meters (bytesDone, bytesTotal, speed, eta,
  * actualHeight, sourceHeight) never make a job invalid: a bad one is loaded as 0 or null.
+ * Nor do referer and userAgent: absent, null or invalid loads as null. oneShotLogin
+ * absent loads as false; null or any other non-boolean makes the job invalid, as for
+ * interrupted.
  */
 export function parseSnapshotFile(raw: unknown): Snapshot | null {
   if (!isPlainObject(raw)) return null;

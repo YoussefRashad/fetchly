@@ -21,6 +21,7 @@ import {
 import { formatPairingString, isServerPort } from '../shared/protocol';
 import { CONTROL } from '../shared/text';
 import { isRunnableFile } from './fileSafety';
+import type { QueueAdd } from './jobs/queue';
 import { normalizeSettings } from './jobs/store';
 import { copyQuality, everyPosition, isAbsoluteDir, isLangList, isQuality } from './jobs/validate';
 import { sanitizeFileName } from './naming';
@@ -31,7 +32,7 @@ import { MAX_HEIGHTS } from './ytdlp/parse';
 
 /** The part of the queue the window can reach. */
 export interface QueueLike {
-  add(req: AddRequest): void;
+  add(req: QueueAdd): void;
   job(id: string, verb: JobVerb): Promise<Result<null>>;
   group(id: string, verb: GroupVerb): Promise<Result<null>>;
   /** The user ended the leftover tool processes by hand. */
@@ -242,6 +243,10 @@ export function createHandlers(deps: HandlerDeps) {
           subtitleLangs: req.subtitleLangs,
           dir: req.dir,
           selectedIndexes: selected,
+          // Only main supplies these; nothing the window sends reaches them.
+          referer: null,
+          userAgent: null,
+          oneShotLogin: false,
         });
         return ok(null);
       }),

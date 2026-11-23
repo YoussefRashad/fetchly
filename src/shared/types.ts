@@ -56,6 +56,19 @@ export interface Job {
   interrupted: boolean;
   /** Highest video height the site offered when probed; null = not known. */
   sourceHeight: number | null;
+  /**
+   * The page a browser hand-off came from, as origin + path only (no query, no hash, no `"`), sent as the
+   * Referer header; null = none. A stored value that is not its own reduceReferer() loads as null.
+   */
+  referer: string | null;
+  /** The browser's User-Agent sent with a hand-off (isUserAgent); null = the tool's own. A bad stored value loads as null. */
+  userAgent: string | null;
+  /**
+   * true = the job was added with a sign-in that is held for one run only (A5). Never set to true before A5; a job
+   * stored with true does not start until A5 supplies that sign-in. A stored value that is not a boolean makes
+   * jobs.json invalid, as a bad `interrupted` does.
+   */
+  oneShotLogin: boolean;
 }
 
 export interface Group {
