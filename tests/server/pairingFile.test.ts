@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadPairingFile, savePairingFile, type Pairing, type PairingFile } from '../../src/main/server/pairing';
+import { shellStrings } from '../../src/main/shellStrings';
 import { ORIGIN_A, ORIGIN_B, makeStore, pairOnce, storedPairing } from './fakes';
 
 const hooks = vi.hoisted(() => ({ renameFails: false }));
@@ -128,6 +129,28 @@ describe('a file that cannot be read is set aside', () => {
     expect(more).toEqual([]);
     expect(aside).toBeDefined();
     expect(readFileSync(join(dir, aside ?? ''), 'utf8')).toBe(text);
+  });
+
+  it('aside is the set-aside path, and the English notice is shellStrings("en").pairingNotice of it', () => {
+    writeFileSync(FILE(), '{ truncated');
+    const loaded = loadPairingFile(dir, 38917);
+    const [name] = asides();
+    expect(loaded.aside).toBe(join(dir, name ?? ''));
+    expect(loaded.notice).toBe(shellStrings('en').pairingNotice(loaded.aside ?? null));
+  });
+
+  it('a failing rename gives aside null, and the English notice is the no-path wording', () => {
+    writeFileSync(FILE(), '{ truncated');
+    hooks.renameFails = true;
+    const loaded = loadPairingFile(dir, 38917);
+    expect(loaded.aside).toBeNull();
+    expect(loaded.notice).toBe(shellStrings('en').pairingNotice(null));
+  });
+
+  it('a missing or valid file has no aside', () => {
+    expect('aside' in loadPairingFile(dir, 38917)).toBe(false);
+    savePairingFile(dir, valid(1));
+    expect('aside' in loadPairingFile(dir, 38917)).toBe(false);
   });
 
   it('the notice never carries key material from the file', () => {

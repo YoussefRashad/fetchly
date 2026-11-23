@@ -80,6 +80,31 @@ describe('shellStrings', () => {
     expect(shellStrings('ar').runnableMessage('setup.exe')).toContain('\u2068setup.exe\u2069');
     expect(shellStrings('en').runnableMessage('setup.exe')).toBe('"setup.exe" can run a program or change this PC when it is opened.');
   });
+
+  it('words the pairing-file notice as A1 did in English, and isolates its path in Arabic', () => {
+    const aside = 'C:\\Users\\me\\AppData\\Roaming\\fetchly\\pairing.json.corrupt-1';
+    expect(shellStrings('en').pairingNotice(aside)).toBe(
+      `The list of paired browsers could not be read and was set aside as ${aside}. Pair your browsers again.`,
+    );
+    expect(shellStrings('en').pairingNotice(null)).toBe('The list of paired browsers could not be read. Pair your browsers again.');
+    expect(shellStrings('ar').pairingNotice(aside)).toContain(`\u2068${aside}\u2069`);
+    expect(shellStrings('ar').pairingNotice(null)).not.toContain('\u2068');
+  });
+
+  it('words the port-change dialog as A1 did in English, with one or several browsers', () => {
+    const en = shellStrings('en');
+    expect([en.portChangeTitle, en.portChangeDetail, en.portChangeConfirm, en.portChangeCancel]).toEqual([
+      'Change the port?',
+      'Each browser has to be paired again on the new port.',
+      'Change port',
+      'Cancel',
+    ]);
+    expect(en.portChangeMessage(1)).toBe('Changing the port removes the paired browser.');
+    expect(en.portChangeMessage(3)).toBe('Changing the port removes all 3 paired browsers.');
+    const ar = shellStrings('ar');
+    expect(ar.portChangeMessage(1)).not.toBe(ar.portChangeMessage(3));
+    expect(ar.portChangeMessage(3)).toContain('3');
+  });
 });
 
 describe('trayIconBitmap', () => {

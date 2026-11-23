@@ -313,10 +313,15 @@ function parseFile(raw: unknown): Pairing[] | null {
 
 /**
  * Reads <dir>/pairing.json. Missing: unpaired, no notice. Unreadable or invalid: set aside as
- * pairing.json.corrupt-<n> (a failing rename is ignored), unpaired, and a notice for the window.
- * An entry whose port is not `effectivePort` is ignored and the file is not rewritten (S12). Never throws.
+ * pairing.json.corrupt-<n> (a failing rename is ignored), unpaired, and a notice for the window. `aside` is
+ * present only then: the set-aside path, or null when the rename failed, so the window's notice can be worded
+ * in its own language (the English `notice` is the same text). An entry whose port is not `effectivePort` is
+ * ignored and the file is not rewritten (S12). Never throws.
  */
-export function loadPairingFile(dir: string, effectivePort: number): { pairings: Pairing[]; notice: string | null } {
+export function loadPairingFile(
+  dir: string,
+  effectivePort: number,
+): { pairings: Pairing[]; notice: string | null; aside?: string | null } {
   const path = join(dir, 'pairing.json');
   if (!existsSync(path)) return { pairings: [], notice: null };
   let entries: Pairing[] | null;
@@ -330,9 +335,13 @@ export function loadPairingFile(dir: string, effectivePort: number): { pairings:
   try {
     renameSync(path, aside);
   } catch {
-    return { pairings: [], notice: 'The list of paired browsers could not be read. Pair your browsers again.' };
+    return { pairings: [], notice: 'The list of paired browsers could not be read. Pair your browsers again.', aside: null };
   }
-  return { pairings: [], notice: `The list of paired browsers could not be read and was set aside as ${aside}. Pair your browsers again.` };
+  return {
+    pairings: [],
+    notice: `The list of paired browsers could not be read and was set aside as ${aside}. Pair your browsers again.`,
+    aside,
+  };
 }
 
 /** Writes <dir>/pairing.json through writeAtomic; throws on failure. */

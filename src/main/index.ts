@@ -90,8 +90,8 @@ async function main(): Promise<void> {
 
   // The browser pairings, for the effective port only (S12); an unreadable file is set aside with a notice.
   const loadedPairings = loadPairingFile(userData, settings.serverPort);
-  /** The pairing file's notice (worded in pairing.ts), shown once after the jobs notice. */
-  let pairingNotice: string | null = loadedPairings.notice;
+  /** The pairing file that could not be read (undefined: none), worded after the jobs notice, like it. */
+  let pairingAside: string | null | undefined = loadedPairings.aside;
   const serverDeps = productionDeps();
   /** The started server; null until start() resolved, so the store sees no `listening` before that. */
   let runningServer: RunningServer | null = null;
@@ -226,13 +226,14 @@ async function main(): Promise<void> {
     },
     showItem: (path) => shell.showItemInFolder(path),
     startupNotice: () => {
-      const once = setAside;
-      const pairingOnce = pairingNotice;
+      const t = shellStrings(lang());
+      const parts = [
+        setAside === null ? null : t.corruptNotice(setAside),
+        pairingAside === undefined ? null : t.pairingNotice(pairingAside),
+      ].filter((p): p is string => p !== null);
       setAside = null;
-      pairingNotice = null;
-      const jobs = once === null ? null : shellStrings(lang()).corruptNotice(once);
-      if (jobs === null) return pairingOnce;
-      return pairingOnce === null ? jobs : `${jobs} ${pairingOnce}`;
+      pairingAside = undefined;
+      return parts.length === 0 ? null : parts.join(' ');
     },
     pairing,
     server: {
@@ -244,12 +245,13 @@ async function main(): Promise<void> {
       },
     },
     confirmPortChange: async (count) => {
+      const t = shellStrings(lang());
       const options: MessageBoxOptions = {
         type: 'warning',
-        title: 'Change the port?',
-        message: count === 1 ? 'Changing the port removes the paired browser.' : `Changing the port removes all ${count} paired browsers.`,
-        detail: 'Each browser has to be paired again on the new port.',
-        buttons: ['Change port', 'Cancel'],
+        title: t.portChangeTitle,
+        message: t.portChangeMessage(count),
+        detail: t.portChangeDetail,
+        buttons: [t.portChangeConfirm, t.portChangeCancel],
         defaultId: 1,
         cancelId: 1,
         noLink: true,
