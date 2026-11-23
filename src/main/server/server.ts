@@ -275,6 +275,16 @@ interface Attempt {
   server: http.Server | null;
 }
 
+/**
+ * The status of a listen that failed on `requested`: EADDRINUSE is portBusy, EACCES the port text, anything else the
+ * start-failed text. Used before 'listening' and in the handover gap (no caller ever saw that server listening).
+ */
+function listenFailure(e: NodeJS.ErrnoException, requested: number): ServerStatus {
+  if (e.code === 'EADDRINUSE') return { state: 'portBusy', port: requested };
+  if (e.code === 'EACCES') return { state: 'error', message: accessText(requested) };
+  return { state: 'error', message: START_FAILED_TEXT };
+}
+
 /** Starts listening on 127.0.0.1:`port`. Never rejects: the status says how it went (S16). */
 export async function start(port: number, deps: ServerDeps): Promise<RunningServer> {
   let status: ServerStatus = { state: 'error', message: STARTING_TEXT };
@@ -286,7 +296,8 @@ export async function start(port: number, deps: ServerDeps): Promise<RunningServ
   let cancelPending: (() => void) | null = null;
   /**
    * The server whose 'listening' settled the attempt, until the continuation of ensure takes it (it becomes
-   * `current`, or is shut if stopped). stop() in that gap closes it; null outside the gap.
+   * `current`, or is shut if stopped). stop() in that gap closes it; an 'error' in that gap shuts it and turns the
+   * attempt into a listen failure (the continuation then reads no server). null outside the gap.
    */
   let handover: http.Server | null = null;
 
@@ -296,6 +307,8 @@ export async function start(port: number, deps: ServerDeps): Promise<RunningServ
       let settled = false;
       let timer: unknown = null;
       const at = { port: 0 };
+      /** The result 'listening' settled with; an 'error' in the handover gap rewrites it before ensure reads it. */
+      let listened: Attempt | null = null;
       const settle = (result: Attempt): boolean => {
         if (settled) return false;
         settled = true;
@@ -338,15 +351,14 @@ export async function start(port: number, deps: ServerDeps): Promise<RunningServ
         const address = server.address();
         at.port = typeof address === 'object' && address !== null ? address.port : 0;
         handover = server;
-        settle({ status: { state: 'listening', port: at.port }, server });
+        listened = { status: { state: 'listening', port: at.port }, server };
+        settle(listened);
       });
 
       server.on('error', (e: NodeJS.ErrnoException) => {
         if (!settled) {
           shut(server);
-          if (e.code === 'EADDRINUSE') settle({ status: { state: 'portBusy', port: requested }, server: null });
-          else if (e.code === 'EACCES') settle({ status: { state: 'error', message: accessText(requested) }, server: null });
-          else settle({ status: { state: 'error', message: START_FAILED_TEXT }, server: null });
+          settle({ status: listenFailure(e, requested), server: null });
           return;
         }
         // An error after listening: this listener is gone; leaving `listening` cancels the code.
@@ -355,6 +367,15 @@ export async function start(port: number, deps: ServerDeps): Promise<RunningServ
           status = { state: 'error', message: BROKEN_TEXT };
           deps.pairing.cancel();
           shut(server);
+          return;
+        }
+        // An error in the handover gap: no caller saw this server listening, so it is a listen failure. The settled
+        // result is rewritten before the continuation of ensure reads it; the code was cancelled when the move began.
+        if (server === handover && listened !== null) {
+          handover = null;
+          shut(server);
+          listened.status = listenFailure(e, requested);
+          listened.server = null;
         }
       });
 

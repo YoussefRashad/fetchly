@@ -682,3 +682,297 @@ describe('stop', () => {
   });
 });
 
+// Task D, item 1 (frozen plan docs/plans/2026-11-23-d-housekeeping.md, "Item 1").
+// An 'error' between 'listening' (which settles the attempt and sets `handover`) and the continuation of ensure
+// (which makes the server `current`) used to be ignored: ensure then reported `listening` for a failed server. Now the
+// gap error takes the listen-error path (EADDRINUSE -> portBusy, EACCES -> the port text, anything else -> the
+// start-failed text), the failed server is shut in the same tick and the attempt ends as that failure.
+// Error statuses are asserted with toMatchObject({ state, message }) so that a later `code` field breaks nothing.
+const START_FAILED = 'The browser connection could not start; save Settings to try again';
+const BROKEN = 'The browser connection stopped working; save Settings to start it again';
+const STARTING = 'The browser connection is starting';
+const STOPPED = 'The browser connection is stopped';
+const portText = (port: number): string => `port ${port} cannot be used on this PC; choose another in Settings`;
+
+/**
+ * Runs `act(s)` from a 'listening' listener added just before the real listen call (pattern of the F4 specs above).
+ * It is registered after the app's own 'listening' listener, so it runs right after it: the attempt is settled and
+ * `handover` is set, but the continuation of ensure has not run yet. This is the handover gap.
+ */
+function inGap(s: http.Server, act: (s: http.Server) => void): void {
+  const real = s.listen as unknown as Listen;
+  setListen(s, (...args: unknown[]) => {
+    s.once('listening', () => act(s));
+    return real.apply(s, args);
+  });
+}
+
+/** An error with the given `code` (none when undefined) and a message that must never reach a status. */
+const gapError = (code?: string | number, message = 'SECRET-DETAIL-ZZ'): Error => Object.assign(new Error(message), code === undefined ? {} : { code });
+
+/**
+ * A server listening on p1 whose NEXT server (the one a move to p2 builds) runs `act(server, running)` in the gap.
+ * Nothing moves until the spec calls `ensure(p2)`.
+ */
+async function bootForGap(act: (s: http.Server, running: RunningServer) => void) {
+  const [p1, p2] = await twoPorts();
+  const box: { running: RunningServer | null } = { running: null };
+  const b = await bootServer({
+    port: p1,
+    onServer: (s, nth) => {
+      if (nth !== 1) return; // the second server: the one the move to p2 binds
+      inGap(s, (server) => {
+        if (box.running) act(server, box.running);
+      });
+    },
+  });
+  box.running = b.running;
+  expect(b.running.status(), 'the first server listens normally').toEqual({ state: 'listening', port: p1 });
+  return { b, p1, p2 };
+}
+
+describe('an error between "listening" and the handover (Task D, item 1)', () => {
+  it('1. a move whose new server fails in the gap: ensure resolves with the start-failed error, and status() says the same', async () => {
+    const { b, p2 } = await bootForGap((s) => {
+      s.emit('error', gapError('EIO'));
+    });
+    const st = await within(b.running.ensure(p2), 3000, 'ensure');
+    expect(st).toMatchObject({ state: 'error', message: START_FAILED });
+    expect(b.running.status()).toEqual(st);
+    expect(b.running.status()).toMatchObject({ state: 'error', message: START_FAILED });
+  });
+
+  it('2. inside the gap, right after the error, status() is still the starting error (never listening)', async () => {
+    const seen: { status: ServerStatus | null } = { status: null };
+    const { b, p2 } = await bootForGap((s, running) => {
+      s.emit('error', gapError('EIO'));
+      seen.status = running.status();
+    });
+    await within(b.running.ensure(p2), 3000, 'ensure');
+    expect(seen.status).not.toBeNull();
+    expect(seen.status).toMatchObject({ state: 'error', message: STARTING });
+  });
+
+  it('3. the failed server is shut in the same tick (close() and closeAllConnections() before the emit returns), and its port is released', async () => {
+    const seen = { closeCalls: -1, closeAllCalls: -1 };
+    const { b, p2 } = await bootForGap((s) => {
+      const close = vi.spyOn(s, 'close');
+      const closeAll = vi.spyOn(s, 'closeAllConnections');
+      s.emit('error', gapError('EIO'));
+      seen.closeCalls = close.mock.calls.length;
+      seen.closeAllCalls = closeAll.mock.calls.length;
+    });
+    await within(b.running.ensure(p2), 3000, 'ensure');
+    expect(seen.closeCalls, 'close() on the failed server, before the emit returned').toBeGreaterThanOrEqual(1);
+    expect(seen.closeAllCalls, 'closeAllConnections() on the failed server, before the emit returned').toBeGreaterThanOrEqual(1);
+    expect(await refusesConnections(p2, 3000), 'nothing keeps the new port').toBe(true);
+    expect(b.servers[1]?.listening).toBe(false);
+  });
+
+  // The mapping is the listen-error one (D1.1), not BROKEN_TEXT: no caller ever saw this server listening.
+  it.each<[string, string | number | undefined, (port: number) => object]>([
+    ['EADDRINUSE: portBusy with the requested port', 'EADDRINUSE', (port) => ({ state: 'portBusy', port })],
+    ['EACCES: the port text naming the requested port', 'EACCES', (port) => ({ state: 'error', message: portText(port) })],
+    ['EIO: the start-failed text', 'EIO', () => ({ state: 'error', message: START_FAILED })],
+    ['EPERM: the start-failed text', 'EPERM', () => ({ state: 'error', message: START_FAILED })],
+    ['an error with no code: the start-failed text', undefined, () => ({ state: 'error', message: START_FAILED })],
+    ['a lower-case "eaddrinuse" is not EADDRINUSE: the start-failed text', 'eaddrinuse', () => ({ state: 'error', message: START_FAILED })],
+    ['a numeric code is not a known code: the start-failed text', 98, () => ({ state: 'error', message: START_FAILED })],
+  ])('4. %s', async (_name, code, want) => {
+    const { b, p2 } = await bootForGap((s) => {
+      s.emit('error', gapError(code));
+    });
+    const st = await within(b.running.ensure(p2), 3000, 'ensure');
+    expect(st).toMatchObject(want(p2));
+    expect(b.running.status()).toEqual(st);
+    expect(JSON.stringify(st), 'no detail of the error reaches the status').not.toContain('SECRET-DETAIL-ZZ');
+  });
+
+  it('5. the same on the first server: start() resolves with the start-failed error, not listening', async () => {
+    const p1 = await freePort();
+    const p = await prepareServer({
+      port: p1,
+      onServer: (s) => {
+        inGap(s, (server) => {
+          server.emit('error', gapError('EIO'));
+        });
+      },
+    });
+    const running = await within(p.start(), 3000, 'start');
+    expect(running.status()).toMatchObject({ state: 'error', message: START_FAILED });
+    expect(p.store.open().ok, 'pairing is not offered on a failed server').toBe(false);
+    expect(await refusesConnections(p1, 3000), 'nothing keeps the port').toBe(true);
+  });
+
+  it('6. no code can be opened on the failed server, and once its port is released ensure listens on a third server', async () => {
+    const { b, p2 } = await bootForGap((s) => {
+      s.emit('error', gapError('EIO'));
+    });
+    expect(b.store.open().ok, 'a code is open on p1 before the move').toBe(true);
+    const failed = await within(b.running.ensure(p2), 3000, 'ensure');
+    expect(failed.state).toBe('error');
+    expect(b.store.codeOpen(), 'the move cancelled the code').toBe(false);
+    expect(b.store.open().ok, 'pairing is not offered while the status is error').toBe(false);
+    expect(b.store.codeOpen()).toBe(false);
+    // The failed server's close is not awaited: wait for the port before asking for it again.
+    expect(await refusesConnections(p2, 3000), 'the failed server released p2').toBe(true);
+    expect(await within(b.running.ensure(p2), 3000, 'ensure')).toEqual({ state: 'listening', port: p2 });
+    expect(b.servers).toHaveLength(3);
+    expect(b.servers[2]?.listening).toBe(true);
+    expect(b.store.open().ok, 'listening again: pairing is offered').toBe(true);
+  });
+
+  it('7a. a second error on the revoked server in the same gap changes nothing: it is shut once, not again', async () => {
+    const seen = { closeCalls: -1 };
+    const { b, p2 } = await bootForGap((s) => {
+      const close = vi.spyOn(s, 'close');
+      s.emit('error', gapError('EIO'));
+      s.emit('error', gapError('EACCES'));
+      seen.closeCalls = close.mock.calls.length;
+    });
+    const st = await within(b.running.ensure(p2), 3000, 'ensure');
+    expect(st).toMatchObject({ state: 'error', message: START_FAILED }); // the first error decided, the second is ignored
+    expect(seen.closeCalls, 'the revoked server is not shut a second time').toBe(1);
+  });
+
+  it('7b. a second error on the revoked server, before and after a successful ensure, changes nothing', async () => {
+    const { b, p2 } = await bootForGap((s) => {
+      s.emit('error', gapError('EIO'));
+    });
+    const failed = await within(b.running.ensure(p2), 3000, 'ensure');
+    expect(failed).toMatchObject({ state: 'error', message: START_FAILED });
+    const revoked = b.servers[1];
+    if (!revoked) throw new Error('no second server');
+
+    // Before: the status is the failure, and a late error does not turn it into BROKEN_TEXT or anything else.
+    revoked.emit('error', gapError('EIO'));
+    expect(b.running.status()).toEqual(failed);
+
+    expect(await refusesConnections(p2, 3000), 'the failed server released p2').toBe(true);
+    expect(await within(b.running.ensure(p2), 3000, 'ensure')).toEqual({ state: 'listening', port: p2 });
+    const live = b.servers[2];
+    if (!live) throw new Error('no third server');
+    expect(b.store.open().ok).toBe(true);
+
+    // After: the live listener, its status and the open code are untouched.
+    revoked.emit('error', gapError('EIO'));
+    revoked.emit('error', gapError('EADDRINUSE'));
+    expect(b.running.status()).toEqual({ state: 'listening', port: p2 });
+    expect(live.listening).toBe(true);
+    expect(b.store.codeOpen(), 'the open code is not cancelled by an error of a revoked server').toBe(true);
+    const reply = await send(p2, { method: 'POST', target: '/nope', headers: [['Host', `127.0.0.1:${p2}`], ['Origin', ORIGIN_A], ['Content-Type', 'application/json'], ['Content-Length', '2']], body: '{}' });
+    expect(reply.status).toBe(404);
+  });
+
+  // The third branch is for `server === handover` only: an error of an older, revoked server that arrives while another
+  // server is in its gap must not take that gap's `handover` away (stop() would then not close the bound server).
+  it('7c. an error on an older revoked server during a later gap leaves that gap alone: stop() still closes the server in it', async () => {
+    const [p1, p2] = await twoPorts();
+    const box: { running: RunningServer | null; revoked: http.Server | null } = { running: null, revoked: null };
+    const seen = { closeCalls: -1, closeAllCalls: -1, stopping: null as Promise<void> | null };
+    const b = await bootServer({
+      port: p1,
+      onServer: (s, nth) => {
+        if (nth === 1) {
+          box.revoked = s;
+          inGap(s, (server) => {
+            server.emit('error', gapError('EIO'));
+          });
+        }
+        if (nth === 2) {
+          inGap(s, (server) => {
+            const close = vi.spyOn(server, 'close');
+            const closeAll = vi.spyOn(server, 'closeAllConnections');
+            box.revoked?.emit('error', gapError('EIO')); // the stray error of the first, failed server
+            seen.stopping = box.running?.stop() ?? null;
+            seen.closeCalls = close.mock.calls.length;
+            seen.closeAllCalls = closeAll.mock.calls.length;
+          });
+        }
+      },
+    });
+    box.running = b.running;
+    expect((await within(b.running.ensure(p2), 3000, 'ensure')).state, 'the first move fails in its gap').toBe('error');
+    expect(await refusesConnections(p2, 3000), 'the failed server released p2').toBe(true);
+    const second = await within(b.running.ensure(p2), 3000, 'ensure');
+    if (!seen.stopping) throw new Error('the second server never reached its gap');
+    expect(seen.closeCalls, "close() on the bound server, before stop's first await").toBeGreaterThanOrEqual(1);
+    expect(seen.closeAllCalls, "closeAllConnections() on the bound server, before stop's first await").toBeGreaterThanOrEqual(1);
+    expect(second.state).not.toBe('listening');
+    await within(seen.stopping, 2000, 'stop');
+    expect(b.running.status()).toMatchObject({ state: 'error', message: STOPPED });
+    expect(await refusesConnections(p2, 3000), 'nothing keeps the new port').toBe(true);
+  });
+
+  it('8. stop() in the gap, then an error on that server: stop resolves and the status is the stopped text', async () => {
+    const seen: { stopping: Promise<void> | null } = { stopping: null };
+    const { b, p2 } = await bootForGap((s, running) => {
+      seen.stopping = running.stop();
+      s.emit('error', gapError('EIO'));
+    });
+    const moved = await within(b.running.ensure(p2), 3000, 'ensure');
+    expect(moved.state).not.toBe('listening');
+    if (!seen.stopping) throw new Error('stop was never called');
+    await within(seen.stopping, 2000, 'stop');
+    expect(b.running.status()).toMatchObject({ state: 'error', message: STOPPED });
+    expect(await refusesConnections(p2, 3000), 'nothing keeps the new port').toBe(true);
+    expect(b.store.open().ok).toBe(false);
+  });
+
+  it('9. an error in the gap, then stop() in the same listener: stop resolves, the status is the stopped text, p2 is released', async () => {
+    const seen: { stopping: Promise<void> | null } = { stopping: null };
+    const { b, p2 } = await bootForGap((s, running) => {
+      s.emit('error', gapError('EIO'));
+      seen.stopping = running.stop();
+    });
+    const moved = await within(b.running.ensure(p2), 3000, 'ensure');
+    expect(moved.state).not.toBe('listening');
+    if (!seen.stopping) throw new Error('stop was never called');
+    await within(seen.stopping, 2000, 'stop');
+    expect(b.running.status()).toMatchObject({ state: 'error', message: STOPPED });
+    expect(await refusesConnections(p2, 3000), 'nothing keeps the new port').toBe(true);
+    expect(b.store.open().ok).toBe(false);
+  });
+
+  // Edge case of the plan: after the error branch `handover` and `current` are both null, so stop() has no server to
+  // await and resolves without waiting for that server's 'close'. The spec defers the real close() by 40 ms (the
+  // pattern of the spec above that pins the opposite case); a stop() that still held the failed server as `handover`
+  // would wait for it and settle only after the 'close'.
+  it("9b. an error in the gap, then stop() in the same listener: stop does not wait for the failed server's 'close'", async () => {
+    const seen = { stopSettled: false, closeEmitted: false, stopping: null as Promise<void> | null };
+    const { b, p2 } = await bootForGap((s, running) => {
+      const realClose = s.close.bind(s) as (cb?: (err?: Error) => void) => http.Server;
+      (s as unknown as { close: (cb?: (err?: Error) => void) => http.Server }).close = (cb) => {
+        setTimeout(() => realClose(cb), 40);
+        return s;
+      };
+      s.once('close', () => {
+        seen.closeEmitted = true;
+      });
+      s.emit('error', gapError('EIO'));
+      seen.stopping = running.stop().then(() => {
+        seen.stopSettled = true;
+      });
+    });
+    await within(b.running.ensure(p2), 3000, 'ensure');
+    if (!seen.stopping) throw new Error('stop was never called');
+    await within(seen.stopping, 2000, 'stop');
+    expect(seen.closeEmitted, 'the deferred close() has not happened yet').toBe(false);
+    expect(seen.stopSettled, "stop() did not wait for the failed server's 'close'").toBe(true);
+    expect(b.running.status()).toMatchObject({ state: 'error', message: STOPPED });
+    expect(await refusesConnections(p2, 3000), 'the failed server still gets closed').toBe(true);
+  });
+
+  it('10. boundary: an error after ensure resolved is still the broken text, and cancels the open code', async () => {
+    const [p1, p2] = await twoPorts();
+    const b = await bootServer({ port: p1 });
+    expect(await within(b.running.ensure(p2), 3000, 'ensure')).toEqual({ state: 'listening', port: p2 });
+    expect(b.store.open().ok).toBe(true);
+    b.servers[1]?.emit('error', gapError('EIO'));
+    expect(b.running.status()).toMatchObject({ state: 'error', message: BROKEN });
+    expect(JSON.stringify(b.running.status())).not.toContain('SECRET-DETAIL-ZZ');
+    expect(b.store.codeOpen()).toBe(false);
+    expect(await refusesConnections(p2, 3000), 'the broken server is shut').toBe(true);
+  });
+});
+
