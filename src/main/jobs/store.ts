@@ -11,6 +11,8 @@ export { normalizeSettings };
 
 export function DEFAULT_SETTINGS(downloadsDir: string): Settings {
   return {
+    language: 'system',
+    theme: 'system',
     downloadDir: join(downloadsDir, 'Fetchly'),
     askEveryTime: false,
     maxConcurrent: 3,

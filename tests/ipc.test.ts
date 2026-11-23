@@ -869,6 +869,56 @@ describe('settings', () => {
     expect(await createHandlers(deps()).setSettings(makeSettings({ downloadDir: dir }))).toMatchObject({ ok: true });
     expect(savedSettings).toHaveLength(1);
   });
+
+  describe('language and theme', () => {
+    const LANGUAGES = ['system', 'en', 'ar'] as const;
+    const THEMES = ['system', 'light', 'dark'] as const;
+
+    it.each(LANGUAGES.flatMap((language) => THEMES.map((theme) => [language, theme] as const)))(
+      'keeps the language %s and the theme %s in the save, the queue and the answer',
+      async (language, theme) => {
+        const res = await createHandlers(deps()).setSettings(makeSettings({ downloadDir: dir, language, theme }));
+        expect(res).toMatchObject({ ok: true, value: { language, theme } });
+        expect(savedSettings).toHaveLength(1);
+        expect(savedSettings[0]).toMatchObject({ language, theme });
+        expect(queueSettings[0]).toMatchObject({ language, theme });
+      },
+    );
+
+    const BAD: [string, unknown][] = [
+      ['missing', undefined],
+      ['null', null],
+      ['a number', 1],
+      ['true', true],
+      ['empty text', ''],
+      ['an array', ['ar']],
+      ['an object', { value: 'ar' }],
+      ['unknown', 'auto'],
+    ];
+    const BAD_LANGUAGE: [string, unknown][] = [...BAD, ['wrong case', 'AR'], ['wrong case', 'System'], ['unknown', 'fr'], ['a theme value', 'dark']];
+    const BAD_THEME: [string, unknown][] = [...BAD, ['wrong case', 'Dark'], ['wrong case', 'System'], ['a language value', 'ar']];
+
+    it.each(BAD_LANGUAGE)('refuses a language that is %s (%j) and saves nothing', async (_what, bad) => {
+      const sent = { ...makeSettings({ downloadDir: dir, theme: 'dark' }), language: bad } as Record<string, unknown>;
+      if (bad === undefined) delete sent['language'];
+      expect(await createHandlers(deps()).setSettings(sent as unknown as Settings)).toEqual({ ok: false, error: 'That request is not valid' });
+      expect(savedSettings).toEqual([]);
+      expect(queueSettings).toEqual([]);
+    });
+
+    it.each(BAD_THEME)('refuses a theme that is %s (%j) and saves nothing', async (_what, bad) => {
+      const sent = { ...makeSettings({ downloadDir: dir, language: 'ar' }), theme: bad } as Record<string, unknown>;
+      if (bad === undefined) delete sent['theme'];
+      expect(await createHandlers(deps()).setSettings(sent as unknown as Settings)).toEqual({ ok: false, error: 'That request is not valid' });
+      expect(savedSettings).toEqual([]);
+      expect(queueSettings).toEqual([]);
+    });
+
+    it('refuses before it looks at the other fields', async () => {
+      const sent = { ...makeSettings({ downloadDir: 'relative' }), language: 'xx' } as unknown as Settings;
+      expect(await createHandlers(deps()).setSettings(sent)).toEqual({ ok: false, error: 'That request is not valid' });
+    });
+  });
 });
 
 describe('opening files', () => {

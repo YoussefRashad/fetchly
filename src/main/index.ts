@@ -1,6 +1,8 @@
 import { join } from 'node:path';
 import { app, BrowserWindow, dialog, ipcMain, powerMonitor, shell, type MessageBoxOptions, type Tray } from 'electron';
+import { resolveLang, type Lang } from '../shared/i18n';
 import type { AppStatus, Settings } from '../shared/types';
+import { applyTheme, followThemeBackground, windowBackground } from './appearance';
 import { Binaries } from './binaries';
 import { EngineHost } from './engineHost';
 import { FileEngine, startAria2 } from './engines/file';
@@ -14,7 +16,8 @@ import { createQueueLifecycle } from './queueLifecycle';
 import { createPairingStore, loadPairingFile, savePairingFile } from './server/pairing';
 import { a1Routes, register } from './server/routes';
 import { productionDeps, start as startServer, type RunningServer } from './server/server';
-import { attachQueue, createTray } from './shell';
+import { attachQueue, createTray, refreshTray, type ShellActions } from './shell';
+import { shellStrings } from './shellStrings';
 import { killStrays } from './strays';
 import { ToolGate } from './toolGate';
 
@@ -34,6 +37,7 @@ function createWindow(): BrowserWindow {
     height: 650,
     minWidth: 760,
     minHeight: 480,
+    backgroundColor: windowBackground(),
     title: 'Fetchly',
     autoHideMenuBar: true,
     webPreferences: {
@@ -78,13 +82,16 @@ async function main(): Promise<void> {
   const store = new Store(userData, app.getPath('downloads'));
   const loaded = store.load();
   let settings: Settings = loaded.settings;
-  let notice: string | null = loaded.recoveredCorrupt
-    ? `The saved download list could not be read and was set aside as ${loaded.recoveredCorrupt}. The list starts empty.`
-    : null;
+  applyTheme(settings.theme);
+  followThemeBackground(() => win);
+  const lang = (): Lang => resolveLang(settings.language, app.getLocale());
+  /** The set-aside jobs file; the notice is worded when the window asks, in the language of that moment. */
+  let setAside: string | null = loaded.recoveredCorrupt;
 
   // The browser pairings, for the effective port only (S12); an unreadable file is set aside with a notice.
   const loadedPairings = loadPairingFile(userData, settings.serverPort);
-  if (loadedPairings.notice !== null) notice = notice === null ? loadedPairings.notice : `${notice} ${loadedPairings.notice}`;
+  /** The pairing file's notice (worded in pairing.ts), shown once after the jobs notice. */
+  let pairingNotice: string | null = loadedPairings.notice;
   const serverDeps = productionDeps();
   /** The started server; null until start() resolved, so the store sees no `listening` before that. */
   let runningServer: RunningServer | null = null;
@@ -126,7 +133,7 @@ async function main(): Promise<void> {
     }),
     send,
     attachTray: (queue) => {
-      if (tray) attachQueue(tray, queue, showWindow);
+      if (tray) attachQueue(tray, queue, showWindow, lang);
     },
     onSaveState: (error) => {
       if (error === saveError) return;
@@ -172,6 +179,7 @@ async function main(): Promise<void> {
   // A sleep cancels an open pairing code, whatever the monotonic clock does across it (S23).
   powerMonitor.on('suspend', () => pairing.cancel());
 
+  const trayActions: ShellActions = { showWindow, queue: () => engines.queue(), quit: () => app.quit() };
   const handlers: Handlers = createHandlers({
     queue: () => engines.queue(),
     status: appStatus,
@@ -180,6 +188,8 @@ async function main(): Promise<void> {
     saveSettings: (s) => {
       settings = s;
       store.saveSettings(s);
+      applyTheme(s.theme);
+      if (tray) refreshTray(tray, trayActions, lang());
     },
     validateUrl,
     probe: (url) => tools.shared(() => probeUrl(url, { command: binaries.path('yt-dlp'), prefixArgs: [] })),
@@ -201,12 +211,13 @@ async function main(): Promise<void> {
     },
     confirmOpenRunnable: async (fileName) => {
       if (!win) return false;
+      const t = shellStrings(lang());
       const answer = await dialog.showMessageBox(win, {
         type: 'warning',
-        title: 'Open a file that can run a program?',
-        message: `"${fileName}" can run a program or change this PC when it is opened.`,
-        detail: 'Open it only if you trust the site it came from.',
-        buttons: ['Open', 'Cancel'],
+        title: t.runnableTitle,
+        message: t.runnableMessage(fileName),
+        detail: t.runnableDetail,
+        buttons: [t.runnableOpen, t.runnableCancel],
         defaultId: 1,
         cancelId: 1,
         noLink: true,
@@ -215,9 +226,13 @@ async function main(): Promise<void> {
     },
     showItem: (path) => shell.showItemInFolder(path),
     startupNotice: () => {
-      const once = notice;
-      notice = null;
-      return once;
+      const once = setAside;
+      const pairingOnce = pairingNotice;
+      setAside = null;
+      pairingNotice = null;
+      const jobs = once === null ? null : shellStrings(lang()).corruptNotice(once);
+      if (jobs === null) return pairingOnce;
+      return pairingOnce === null ? jobs : `${jobs} ${pairingOnce}`;
     },
     pairing,
     server: {
@@ -249,7 +264,7 @@ async function main(): Promise<void> {
   }
 
   showWindow();
-  tray = createTray({ showWindow, queue: () => engines.queue(), quit: () => app.quit() });
+  tray = createTray(trayActions, lang);
 
   // Never rejects: a missing tool or a failed start is the engine status the window shows.
   await engines.start();

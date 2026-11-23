@@ -100,14 +100,15 @@ export interface Classified {
 /**
  * First match wins, so the order is part of the rule. Any sign-in hint wins over
  * private, region and removed: a login may fix it, so it stays a retryable failure
- * once logins exist. Region is checked before the generic "video unavailable".
+ * once logins exist. Region is checked before the generic "video unavailable" (yt-dlp also
+ * writes it "This video is unavailable").
  */
 const RULES: [RegExp, 'failed' | 'skipped', string][] = [
   [/\bDRM\b/i, 'skipped', 'protected'],
   [/sign in|log in|login required|cookies|members-only|confirm your age|age[- ]restricted/i, 'failed', 'login required'],
   [/not (made this video )?available in your country|geo.?restrict/i, 'skipped', 'unavailable in region'],
   [/private video/i, 'skipped', 'private'],
-  [/video unavailable|has been removed|account .*terminated|does not exist/i, 'skipped', 'removed'],
+  [/video (?:is )?unavailable|has been removed|account .*terminated|does not exist/i, 'skipped', 'removed'],
   [/no space left|ENOSPC|not enough space/i, 'failed', 'disk full'],
   [/permission denied|EACCES|EPERM|unable to open for writing/i, 'failed', 'cannot write to folder'],
   [/unsupported url/i, 'failed', 'unsupported site'],

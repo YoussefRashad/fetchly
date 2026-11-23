@@ -34,6 +34,8 @@ export function makeJob(over: Partial<Job> = {}): Job {
 
 export function makeSettings(over: Partial<Settings> = {}): Settings {
   return {
+    language: 'system',
+    theme: 'system',
     downloadDir: 'D:\\Dl',
     askEveryTime: false,
     maxConcurrent: 3,

@@ -32,10 +32,15 @@ export function GroupRow({ group, members, visible, onError }: Props) {
         <button type="button" className="twisty" onClick={() => setOpen(!open)} aria-expanded={open} aria-label={group.title}>
           {open ? '▾' : '▸'}
         </button>
-        <span className="job-name" dir="auto" title={group.title}>
-          {group.title}
+        <span className="job-name" title={group.title}>
+          <bdi dir="auto" className="job-name-text">
+            {group.title}
+          </bdi>
         </span>
-        <span className="job-quality">{S.items(summary.done, summary.total)}</span>
+        <span className="job-quality">
+          <bdi dir="ltr">{S.items(summary.done, summary.total)}</bdi>
+        </span>
+        <span className="job-size" />
         <span className="job-status">{summary.percent}%</span>
         <span className="job-actions">
           {canPause && (

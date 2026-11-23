@@ -35,6 +35,10 @@ and lists such items as `skipped: protected`.
   to them without losing progress.
 - **Tray app.** Closing the window keeps downloads running; the tray tooltip
   shows how many are active.
+- **English or Arabic, light or dark.** Both follow Windows unless set in
+  Settings; Arabic is laid out right to left. Each download shows how much has
+  arrived and, when known, its size (for a video, the size of the stream being
+  downloaded, marked `~`).
 - **One-time setup** that fetches the three tools from their official
   release pages and verifies them by checksum, plus an in-app yt-dlp update
   for when a site changes.
@@ -198,6 +202,11 @@ The tests use no external network and no real tools; some start a server on
 127.0.0.1 and talk to it. `tests/fakes` holds the yt-dlp and aria2 stand-ins.
 CI runs typecheck, lint, the tests and a build on Windows for every push and
 pull request.
+
+`npm run e2e:real -- 2 13` (or `all`) drives the built app (`npm run build` first) through the
+manual checklist with Playwright, on a scratch profile in `.e2e-real/`. It is opt-in, uses the
+network and the real tools, and never runs in CI; the last results are in
+[docs/manual-checklist-phase1-results.md](docs/manual-checklist-phase1-results.md).
 
 Design: [docs/superpowers/specs/2026-11-22-download-manager-design.md](docs/superpowers/specs/2026-11-22-download-manager-design.md).
 It was written under the working name Hammel; the dated plans in

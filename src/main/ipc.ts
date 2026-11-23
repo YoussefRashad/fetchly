@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { isLanguageSetting, isThemeSetting } from '../shared/i18n';
 import {
   type AddRequest,
   type AppStatus,
@@ -297,12 +298,15 @@ export function createHandlers(deps: HandlerDeps) {
       try {
         return await guarded(async () => {
           if (!isObject(s)) return fail(BAD_REQUEST);
+          if (!isLanguageSetting(s.language) || !isThemeSetting(s.theme)) return fail(BAD_REQUEST);
           if (!isAbsoluteDir(s.downloadDir)) return fail('Choose a download folder');
           if (!isQuality(s.defaultQuality)) return fail(BAD_REQUEST);
           if (!isLangList(s.subtitleLangs)) return fail('Subtitle languages must be codes like en or ar');
           // Tested as given, with no Number(...) coercion: "38917" is not a port (S14).
           if (!isServerPort(s.serverPort)) return fail(PORT_TEXT);
           const next = normalizeSettings({
+            language: s.language,
+            theme: s.theme,
             downloadDir: s.downloadDir,
             askEveryTime: s.askEveryTime === true,
             maxConcurrent: Number(s.maxConcurrent),

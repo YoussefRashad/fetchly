@@ -25,9 +25,17 @@ export interface DownloadOptions {
   sourceHeight: number | null;
 }
 
+/**
+ * A height ceiling. `<=?` also keeps a format whose height is unknown (a page's plain
+ * `<video><source>`); without the `?` such a source has no format left to download.
+ */
+function maxHeight(height: number): string {
+  return `[height<=?${height}]`;
+}
+
 /** H.264 + AAC plays everywhere and fits mp4; fall back to whatever exists at that height. */
 function mp4Format(height: number): string[] {
-  const h = `[height<=${height}]`;
+  const h = maxHeight(height);
   return ['-f', `bv*${h}[vcodec^=avc1]+ba[acodec^=mp4a]/bv*${h}+ba/b${h}`, '--merge-output-format', 'mp4'];
 }
 
@@ -44,7 +52,7 @@ function formatArgs(quality: Quality, preferMp4Max1080: boolean, sourceHeight: n
   }
   if (quality.height <= 1080) return mp4Format(quality.height);
   // Above 1080p YouTube only has VP9/AV1; keep the codec, never re-encode.
-  const h = `[height<=${quality.height}]`;
+  const h = maxHeight(quality.height);
   return ['-f', `bv*${h}+ba/b${h}`, '--merge-output-format', 'mkv'];
 }
 

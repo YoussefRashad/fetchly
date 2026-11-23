@@ -62,6 +62,11 @@ function download(name) {
       err('ERROR: [youtube] x: Private video');
       process.exitCode = 1;
       break;
+    case 'removed':
+      // The text yt-dlp gives for a YouTube video that no longer exists.
+      err('ERROR: [youtube] zzzzzzzzzz0: This video is unavailable');
+      process.exitCode = 1;
+      break;
     case 'hang':
       part();
       setInterval(() => progress(100, 1000), 50);
@@ -97,6 +102,14 @@ function download(name) {
     case 'probe-garbage':
       out('this is not json');
       break;
+    case 'probe-sized': {
+      // A valid video JSON of exactly FAKE_YTDLP_PROBE_BYTES bytes, the newline included.
+      const size = Number(process.env.FAKE_YTDLP_PROBE_BYTES);
+      const head = '{"title":"Huge","formats":[{"height":720}],"pad":"';
+      const tail = '"}';
+      out(head + 'x'.repeat(size - head.length - tail.length - 1) + tail);
+      break;
+    }
     case 'probe-killed':
       // Ended from outside (Stop-Process -Force): no output and no ERROR line of its own.
       process.exitCode = 1;

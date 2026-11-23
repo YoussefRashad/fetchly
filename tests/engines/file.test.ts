@@ -1565,6 +1565,16 @@ describe('aria2 daemon command line', () => {
     expect(args.filter((a) => /^--(follow-torrent|follow-metalink|enable-dht6?|bt-enable-lpd|enable-peer-exchange)=(?!false$)/u.test(a))).toEqual([]);
   });
 
+  // F4: aria2 saves the .aria2 control file only every --auto-save-interval seconds (default 60)
+  // and when it stops; an aria2 that is ended loses everything since the last save, so a
+  // restarted aria2 starts the file again from the last save (from 0 within the first minute).
+  it('saves the control file every second, so a download continues after aria2 is ended', () => {
+    expect(args).toContain('--auto-save-interval=1');
+    expect(args).toContain('--continue=true');
+    expect(args.filter((a) => a.startsWith('--auto-save-interval='))).toHaveLength(1);
+    expect(args.some((a) => /^--remove-control-file(=true)?$/u.test(a))).toBe(false);
+  });
+
   it('keeps RPC on this machine with the per-run secret', () => {
     expect(args).toEqual(expect.arrayContaining(['--enable-rpc', '--rpc-listen-all=false', '--rpc-listen-port=6800', '--rpc-secret=abc']));
   });

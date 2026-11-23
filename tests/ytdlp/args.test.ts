@@ -24,7 +24,8 @@ function valueOf(args: string[], flag: string): string | undefined {
   return i === -1 ? undefined : args[i + 1];
 }
 
-const AVC_1080 = 'bv*[height<=1080][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=1080]+ba/b[height<=1080]';
+// `<=?` also keeps a format whose height is unknown; a known height stays capped.
+const AVC_1080 = 'bv*[height<=?1080][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=?1080]+ba/b[height<=?1080]';
 
 describe('probeArgs', () => {
   it('asks for flat JSON', () => {
@@ -48,13 +49,13 @@ describe('downloadArgs format', () => {
 
   it('uses the chosen ceiling below 1080p', () => {
     const args = build({ kind: 'max', height: 480 });
-    expect(valueOf(args, '-f')).toBe('bv*[height<=480][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=480]+ba/b[height<=480]');
+    expect(valueOf(args, '-f')).toBe('bv*[height<=?480][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=?480]+ba/b[height<=?480]');
     expect(valueOf(args, '--merge-output-format')).toBe('mp4');
   });
 
   it('keeps the original codec in mkv above 1080p', () => {
     const args = build({ kind: 'max', height: 2160 });
-    expect(valueOf(args, '-f')).toBe('bv*[height<=2160]+ba/b[height<=2160]');
+    expect(valueOf(args, '-f')).toBe('bv*[height<=?2160]+ba/b[height<=?2160]');
     expect(valueOf(args, '--merge-output-format')).toBe('mkv');
   });
 
@@ -89,6 +90,20 @@ describe('downloadArgs format', () => {
     expect(valueOf(args, '-f')).toBe(AVC_1080);
     expect(valueOf(args, '--merge-output-format')).toBe('mp4');
     expect(valueOf(args, '--remux-video')).toBe('mp4');
+  });
+
+  // F3: a source that does not state its height (a page's <video><source>) must still match.
+  it.each<[string, Quality, boolean, number | null]>([
+    ['always mp4', { kind: 'best' }, true, null],
+    ['always mp4 with Up to 720p', { kind: 'max', height: 720 }, true, null],
+    ['Up to 480p', { kind: 'max', height: 480 }, false, null],
+    ['Up to 2160p', { kind: 'max', height: 2160 }, false, null],
+    ['Best with a known source height', { kind: 'best' }, false, 720],
+  ])('%s: every height filter also keeps formats of unknown height', (_label, quality, preferMp4Max1080, sourceHeight) => {
+    const format = valueOf(build(quality, { preferMp4Max1080, sourceHeight }), '-f') ?? '';
+    const filters = format.match(/\[height[^\]]*\]/gu) ?? [];
+    expect(filters.length).toBeGreaterThan(0);
+    for (const f of filters) expect(f).toMatch(/^\[height<=\?\d+\]$/u);
   });
 
   it.each(['m4a', 'mp3'] as const)('extracts audio as %s without a merge format', (format) => {

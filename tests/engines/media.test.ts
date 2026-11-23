@@ -196,6 +196,11 @@ describe('MediaEngine', () => {
     expect(await waitFor(ended)).toMatchObject({ type: 'error', outcome: 'skipped', reason: 'private', retryable: false });
   });
 
+  it('reports a video yt-dlp calls unavailable as removed and skipped, never retried', async () => {
+    start('removed');
+    expect(await waitFor(ended)).toMatchObject({ type: 'error', outcome: 'skipped', reason: 'removed', retryable: false });
+  });
+
   it('stops a running download quietly and keeps the partial file', async () => {
     const job = start('hang');
     await waitFor(() => events.some((e) => e.type === 'progress'));
@@ -285,7 +290,7 @@ describe('MediaEngine', () => {
     );
     await waitFor(ended);
     const args = JSON.parse(readFileSync(log, 'utf8').trim().split('\n').at(-1) ?? '') as string[];
-    expect(args[args.indexOf('-f') + 1]).toContain('height<=720');
+    expect(args[args.indexOf('-f') + 1]).toContain('height<=?720');
     expect(args[args.indexOf('--sub-langs') + 1]).toBe('ar');
     expect(args[args.indexOf('--limit-rate') + 1]).toBe('307200');
     expect(args[args.indexOf('--ffmpeg-location') + 1]).toBe('C:\\bin\\ffmpeg.exe');

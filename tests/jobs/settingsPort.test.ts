@@ -107,7 +107,7 @@ describe('an invalid port loads the default, not a clamped value', () => {
 
   it('a bad port leaves every other field as saved', () => {
     writeRaw(JSON.stringify({ ...PHASE1, serverPort: 80 }));
-    expect(load()).toStrictEqual({ ...PHASE1, serverPort: 38917 });
+    expect(load()).toStrictEqual({ ...PHASE1, language: 'system', theme: 'system', serverPort: 38917 });
   });
 
   it('a bad other field does not take the good port down with it', () => {
@@ -200,7 +200,7 @@ describe('a Phase 1 fixture', () => {
     const s = load();
     for (const key of PHASE1_KEYS) expect(s[key as keyof typeof s], key).toStrictEqual(PHASE1[key as keyof typeof PHASE1]);
     expect(s.serverPort).toBe(38917);
-    expect(Object.keys(s).sort()).toEqual([...PHASE1_KEYS, 'serverPort'].sort());
+    expect(Object.keys(s).sort()).toEqual([...PHASE1_KEYS, 'language', 'theme', 'serverPort'].sort());
   });
 
   it('nothing is rewritten at load: the file bytes stay as they were', () => {
@@ -214,6 +214,6 @@ describe('a Phase 1 fixture', () => {
     writeRaw(JSON.stringify(PHASE1));
     const store = new Store(dir, DOWNLOADS);
     store.saveSettings(store.load().settings);
-    expect(JSON.parse(readFileSync(file(), 'utf8'))).toEqual({ ...PHASE1, serverPort: 38917 });
+    expect(JSON.parse(readFileSync(file(), 'utf8'))).toEqual({ ...PHASE1, language: 'system', theme: 'system', serverPort: 38917 });
   });
 });

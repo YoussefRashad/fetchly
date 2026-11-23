@@ -1,3 +1,5 @@
+import type { LanguageSetting, ThemeSetting } from './i18n';
+
 export type JobKind = 'media' | 'file';
 
 export type JobState =
@@ -65,6 +67,8 @@ export interface Group {
 }
 
 export interface Settings {
+  language: LanguageSetting;
+  theme: ThemeSetting;
   downloadDir: string;
   askEveryTime: boolean;
   /** 1..8 */
