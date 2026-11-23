@@ -30,6 +30,7 @@ export function UrlBar({ onProbed, onOpenSettings }: Props) {
       <form onSubmit={(e) => void submit(e)}>
         <input
           type="text"
+          dir="ltr"
           value={url}
           placeholder={S.urlPlaceholder}
           aria-label={S.urlPlaceholder}

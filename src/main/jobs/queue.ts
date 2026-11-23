@@ -467,7 +467,8 @@ export class Queue {
         this.replace({
           ...next,
           bytesDone: count(ev.bytesDone) ?? next.bytesDone,
-          bytesTotal: count(ev.bytesTotal) ?? next.bytesTotal,
+          // A media total is the current stream's size: an unknown one clears it. A file keeps its probed size.
+          bytesTotal: count(ev.bytesTotal) ?? (job.kind === 'media' ? null : next.bytesTotal),
           speed: count(ev.speed) ?? 0,
           eta: count(ev.eta),
         });

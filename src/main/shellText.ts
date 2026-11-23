@@ -1,22 +1,26 @@
+import type { Lang } from '../shared/i18n';
 import type { Snapshot } from '../shared/types';
 import { ACTIVE } from './jobs/state';
 import type { Finished } from './jobs/queue';
+import { shellStrings } from './shellStrings';
 
 /** The notification shown when a download or a whole playlist has nothing left to do. */
-export function finishedMessage(e: Finished): { title: string; body: string } {
+export function finishedMessage(e: Finished, lang: Lang = 'en'): { title: string; body: string } {
+  const t = shellStrings(lang);
   if (e.kind === 'job') {
-    const title = e.failed > 0 ? 'Download failed' : e.skipped > 0 ? 'Download skipped' : 'Download finished';
-    return { title, body: e.title };
+    const title = e.failed > 0 ? t.jobFailed : e.skipped > 0 ? t.jobSkipped : t.jobFinished;
+    return { title, body: t.subject(e.title) };
   }
-  const parts = [e.title];
-  if (e.failed > 0) parts.push(`${e.failed} failed`);
-  if (e.skipped > 0) parts.push(`${e.skipped} skipped`);
-  return { title: 'Playlist finished', body: parts.join(' · ') };
+  const parts = [t.subject(e.title)];
+  if (e.failed > 0) parts.push(t.countFailed(e.failed));
+  if (e.skipped > 0) parts.push(t.countSkipped(e.skipped));
+  return { title: t.groupFinished, body: parts.join(' · ') };
 }
 
-export function trayTooltip(s: Snapshot): string {
+export function trayTooltip(s: Snapshot, lang: Lang = 'en'): string {
+  const t = shellStrings(lang);
   const active = s.jobs.filter((j) => ACTIVE.has(j.state)).length;
-  return active === 0 ? 'Fetchly' : `Fetchly · ${active} downloading`;
+  return active === 0 ? t.tooltipIdle : t.tooltipActive(active);
 }
 
 /** The tray icon, drawn here so the project carries no binary asset: a down arrow over a tray line. */

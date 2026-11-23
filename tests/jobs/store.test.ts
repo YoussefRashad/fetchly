@@ -354,6 +354,24 @@ describe('Store', () => {
     expect(new Store(dir, DOWNLOADS).load().settings).toEqual(DEFAULT_SETTINGS(DOWNLOADS));
   });
 
+  it('defaults language and theme to system', () => {
+    expect(DEFAULT_SETTINGS(DOWNLOADS)).toMatchObject({ language: 'system', theme: 'system' });
+  });
+
+  it('loads a settings file written before language and theme existed, with both on system', () => {
+    const old = { ...makeSettings({ downloadDir: 'D:\\Old', maxConcurrent: 5 }) } as Record<string, unknown>;
+    delete old['language'];
+    delete old['theme'];
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify(old));
+    expect(new Store(dir, DOWNLOADS).load().settings).toEqual(makeSettings({ downloadDir: 'D:\\Old', maxConcurrent: 5 }));
+  });
+
+  it('saves and loads a chosen language and theme', () => {
+    const store = new Store(dir, DOWNLOADS);
+    store.saveSettings(makeSettings({ language: 'ar', theme: 'dark' }));
+    expect(store.load().settings).toMatchObject({ language: 'ar', theme: 'dark' });
+  });
+
   it('creates its data folder when it does not exist yet', () => {
     const nested = join(dir, 'a', 'b');
     new Store(nested, DOWNLOADS).saveSnapshot({ jobs: [], groups: [] });

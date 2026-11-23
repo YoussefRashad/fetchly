@@ -86,7 +86,8 @@ describe('statusText', () => {
     [makeJob({ state: 'probing' }), 'starting…'],
     [makeJob({ state: 'downloading', ...half, speed: 3250586, eta: 42 }), '25% · 3.1 MB/s · 0:42'],
     [makeJob({ state: 'downloading', ...half, speed: 0, eta: null }), '25%'],
-    [makeJob({ state: 'downloading', bytesDone: 1536, bytesTotal: null, speed: 1024, eta: null }), '1.5 KB · 1.0 KB/s'],
+    // The bytes are in the size column now, so the status does not repeat them.
+    [makeJob({ state: 'downloading', bytesDone: 1536, bytesTotal: null, speed: 1024, eta: null }), '1.0 KB/s'],
     [makeJob({ state: 'downloading', ...half, speed: 0, eta: null, resumable: false }), '25% · cannot resume'],
     [makeJob({ state: 'paused', ...half }), 'paused 25%'],
     [makeJob({ state: 'paused' }), 'paused'],
@@ -187,7 +188,7 @@ describe('qualityLabel', () => {
     expect(qualityLabel(makeJob({ quality: { kind: 'audio', format: 'mp3' } }))).toBe('mp3');
   });
 
-  it('shows the size for a file', () => {
-    expect(qualityLabel(makeJob({ kind: 'file', quality: null, bytesTotal: 18874368 }))).toBe('18.0 MB');
+  it('is empty for a file: its size has its own column', () => {
+    expect(qualityLabel(makeJob({ kind: 'file', quality: null, bytesTotal: 18874368 }))).toBe('');
   });
 });

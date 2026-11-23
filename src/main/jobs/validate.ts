@@ -1,4 +1,5 @@
 import { win32 } from 'node:path';
+import { isLanguageSetting, isThemeSetting } from '../../shared/i18n';
 import { HEIGHTS, type Group, type Job, type JobKind, type JobState, type Quality, type Settings, type Snapshot } from '../../shared/types';
 
 type Obj = Record<string, unknown>;
@@ -222,6 +223,8 @@ export function parseSnapshotFile(raw: unknown): Snapshot | null {
 }
 
 const SETTING_CHECKS: { [K in keyof Settings]: (v: unknown) => boolean } = {
+  language: isLanguageSetting,
+  theme: isThemeSetting,
   downloadDir: isAbsoluteDir,
   askEveryTime: (v) => typeof v === 'boolean',
   maxConcurrent: (v) => typeof v === 'number' && Number.isFinite(v),

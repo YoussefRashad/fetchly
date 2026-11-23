@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useState } from 'react';
+import { dirOf, resolveLang } from '../../shared/i18n';
 import type { AppStatus, ProbeResult, Settings, Snapshot } from '../../shared/types';
 import { banners, type BannerAction } from './banners';
 import { AddDialog } from './components/AddDialog';
@@ -7,11 +8,9 @@ import { JobList } from './components/JobList';
 import { SettingsDialog } from './components/SettingsDialog';
 import { UrlBar } from './components/UrlBar';
 import { formatSpeed, type Filter } from './format';
-import { S } from './strings';
+import { S, setLanguage } from './strings';
 
 const FILTERS: Filter[] = ['all', 'downloading', 'paused', 'done', 'failed'];
-
-const ACTION_LABELS: Record<BannerAction, string> = { retryEngines: S.retry, confirmStraysGone: S.theyAreGone };
 
 export function App() {
   const [snapshot, setSnapshot] = useState<Snapshot>({ jobs: [], groups: [] });
@@ -22,6 +21,16 @@ export function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [pending, setPending] = useState<BannerAction | null>(null);
+
+  // The language is known once the settings are; everything below reads S in it.
+  const lang = settings === null ? null : resolveLang(settings.language, navigator.language);
+  if (lang !== null) setLanguage(lang);
+
+  useLayoutEffect(() => {
+    if (lang === null) return;
+    document.documentElement.lang = lang;
+    document.documentElement.dir = dirOf(lang);
+  }, [lang]);
 
   const refresh = useCallback(async () => {
     setSnapshot(await window.fetchly.snapshot());
@@ -52,10 +61,11 @@ export function App() {
     }
   }
 
-  if (status === null || settings === null) return null;
+  if (status === null || lang === null || settings === null) return null;
   if (status.engine.state === 'notInstalled') {
     return (
       <InstallScreen
+        key={lang}
         onInstalled={() => {
           void window.fetchly.status().then(setStatus);
           void refresh();
@@ -65,9 +75,10 @@ export function App() {
   }
 
   const totalSpeed = snapshot.jobs.reduce((sum, j) => sum + j.speed, 0);
+  const actionLabels: Record<BannerAction, string> = { retryEngines: S.retry, confirmStraysGone: S.theyAreGone };
 
   return (
-    <div className="app">
+    <div className="app" key={lang}>
       <UrlBar onProbed={(url, probe) => setAdding({ url, probe })} onOpenSettings={() => setShowSettings(true)} />
 
       <nav className="filters">
@@ -76,7 +87,9 @@ export function App() {
             {S.filters[f]}
           </button>
         ))}
-        <span className="speed">{formatSpeed(totalSpeed)}</span>
+        <span className="speed">
+          <bdi dir="ltr">{formatSpeed(totalSpeed)}</bdi>
+        </span>
       </nav>
 
       {banners(status, snapshot).map(({ id, text, action }) => (
@@ -84,7 +97,7 @@ export function App() {
           <span>{text}</span>
           {action !== null && (
             <button type="button" disabled={pending !== null} onClick={() => void runBannerAction(action)}>
-              {ACTION_LABELS[action]}
+              {actionLabels[action]}
             </button>
           )}
         </p>
