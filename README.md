@@ -35,6 +35,10 @@ and lists such items as `skipped: protected`.
   to them without losing progress.
 - **Tray app.** Closing the window keeps downloads running; the tray tooltip
   shows how many are active.
+- **English or Arabic, light or dark.** Both follow Windows unless set in
+  Settings; Arabic is laid out right to left. Each download shows how much has
+  arrived and, when known, its size (for a video, the size of the stream being
+  downloaded, marked `~`).
 - **One-time setup** that fetches the three tools from their official
   release pages and verifies them by checksum, plus an in-app yt-dlp update
   for when a site changes.

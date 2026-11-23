@@ -1,8 +1,16 @@
-import type { EntryReason, GroupVerb, JobVerb } from '../../shared/types';
+import type { Lang } from '../../shared/i18n';
+import type { BinName, EntryReason, GroupVerb, JobVerb } from '../../shared/types';
 import type { Filter } from './format';
+import { AR } from './strings.ar';
 
-/** Text of the window's own controls and dialogs. Status words, reasons from the main process, tray text and notifications are not collected here yet. */
-export const S = {
+/** One line of the install screen: a tool and what it does. */
+type ToolLine = readonly [BinName, string];
+
+/**
+ * English text of the window. `S` holds the text of the language in use; read it inside
+ * functions only, never into a module-level constant, or the text stays in the old language.
+ */
+export const EN = {
   appName: 'Fetchly',
   urlPlaceholder: 'Paste a video, playlist or file link',
   add: 'Add',
@@ -27,6 +35,50 @@ export const S = {
   confirmCancelGroup: (title: string) => `Cancel the rest of "${title}"? Finished files are kept; unfinished ones are deleted.`,
   confirmDeleteFile: (title: string) => `Delete the file of "${title}" from disk?`,
   items: (done: number, total: number) => `${done} / ${total}`,
+  status: {
+    queued: 'queued',
+    starting: 'starting…',
+    finishing: 'finishing…',
+    done: 'done',
+    failed: 'failed',
+    failedWith: (reason: string) => `failed: ${reason}`,
+    skipped: 'skipped',
+    skippedWith: (reason: string) => `skipped: ${reason}`,
+    paused: 'paused',
+    pausedAt: (pct: number) => `paused ${pct}%`,
+    cannotResume: 'cannot resume',
+    waitingForCheck: 'waiting for a check',
+    retrying: (attempt: number, max: number) => `retrying (${attempt}/${max})`,
+  },
+  /** Every reason the main process gives a failed or skipped job, by its English text. */
+  reasons: {
+    protected: 'protected',
+    'login required': 'login required',
+    'unavailable in region': 'unavailable in region',
+    private: 'private',
+    removed: 'removed',
+    unavailable: 'unavailable',
+    'disk full': 'disk full',
+    'cannot write to folder': 'cannot write to folder',
+    'unsupported site': 'unsupported site',
+    'download failed': 'download failed',
+    'finished without a file': 'finished without a file',
+    'not a file download': 'not a file download',
+    'not a media download': 'not a media download',
+    'yt-dlp is not installed': 'yt-dlp is not installed',
+    'timed out reading the link': 'timed out reading the link',
+    'could not read the video information': 'could not read the video information',
+    'file not found on server': 'file not found on server',
+    'file already exists': 'file already exists',
+    'download was removed': 'download was removed',
+    'the download service stopped': 'the download service stopped',
+    'the download service is not running': 'the download service is not running',
+  },
+  size: {
+    mediaHint: 'Size of the part downloading now; video and audio download separately.',
+  },
+  /** The quality column's word for "best available". */
+  qualityBestShort: 'best',
 
   addTitle: 'Add download',
   quality: 'Quality',
@@ -47,6 +99,13 @@ export const S = {
   cannotResume: 'This server does not support resuming. If the download is interrupted it starts again from the beginning.',
 
   settingsTitle: 'Settings',
+  appearance: 'Appearance',
+  language: 'Language',
+  languageSystem: 'System',
+  theme: 'Theme',
+  themeSystem: 'System',
+  themeLight: 'Light',
+  themeDark: 'Dark',
   downloadDir: 'Download folder',
   askEveryTime: 'Ask where to save every time',
   maxConcurrent: 'Downloads at the same time',
@@ -70,7 +129,7 @@ export const S = {
     ['yt-dlp', 'reads video sites and downloads the streams'],
     ['ffmpeg', 'joins the video and audio into one file'],
     ['aria2c', 'downloads ordinary files over several connections'],
-  ] as const,
+  ] as readonly [ToolLine, ToolLine, ToolLine],
   install: 'Install',
   installing: 'Installing…',
   retryInstall: 'Try again',
@@ -81,3 +140,13 @@ export const S = {
   theyAreGone: 'They are gone',
   confirmStraysGone: 'Are yt-dlp, ffmpeg and aria2c no longer listed in Task Manager? The cut-off downloads can then be resumed.',
 };
+
+export type Strings = typeof EN;
+
+/** The text in use; setLanguage swaps it. */
+export const S: Strings = { ...EN };
+
+/** Puts the text of `lang` into S. EN and AR themselves are never changed. */
+export function setLanguage(lang: Lang): void {
+  Object.assign(S, lang === 'ar' ? AR : EN);
+}

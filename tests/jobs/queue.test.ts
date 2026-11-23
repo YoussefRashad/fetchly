@@ -1098,9 +1098,25 @@ describe('persistence and notifications', () => {
     const BAD_NUMBERS = [Number.NaN, -1, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY];
     const KINDS = ['media', 'file'] as const;
 
-    it.each(KINDS.flatMap((kind) => FIELDS.flatMap((field) => BAD_NUMBERS.map((bad) => [kind, field, bad] as const))))(
-      'a %s job keeps what it had when %s becomes %s and takes the other new numbers',
-      (kind, field, bad) => {
+    // A media total that is not a count clears the old total; every other bad meter keeps what it had.
+    const clearsTotal = (kind: (typeof KINDS)[number], field: (typeof FIELDS)[number]) => kind === 'media' && field === 'bytesTotal';
+    const CASES = KINDS.flatMap((kind) =>
+      FIELDS.flatMap((field) =>
+        BAD_NUMBERS.map(
+          (bad) =>
+            [
+              `a ${kind} job ${clearsTotal(kind, field) ? 'clears its total' : 'keeps what it had'} when ${field} becomes ${String(bad)} and takes the other new numbers`,
+              kind,
+              field,
+              bad,
+            ] as const,
+        ),
+      ),
+    );
+
+    it.each(CASES)(
+      '%s',
+      (_name, kind, field, bad) => {
         const q = build();
         q.add(kind === 'media' ? video() : fileReq());
         const engine = kind === 'media' ? media : file;
@@ -1110,7 +1126,9 @@ describe('persistence and notifications', () => {
         const next = { ...NEXT, [field]: bad } as typeof NEXT;
         engine.emit({ jobId: id, type: 'progress', ...next });
 
-        const expected = { ...NEXT, [field]: KEPT[field], actualHeight: null };
+        // A media total that is not a count is an unknown total, and an unknown media total clears the old one.
+        const kept = clearsTotal(kind, field) ? null : KEPT[field];
+        const expected = { ...NEXT, [field]: kept, actualHeight: null };
         expect(meters(savedJob(id))).toEqual(expected);
         expectSound(savedJob(id));
         expect(parseSnapshotFile(JSON.parse(JSON.stringify(saves.at(-1))))).not.toBeNull();
@@ -3699,5 +3717,52 @@ describe('a group is announced after a cancel (7.10)', () => {
     expect(finished).toEqual([]);
     media.emit(error(b, 'removed', false, 'skipped'));
     expect(finished).toEqual([{ kind: 'group', title: GROUP_TITLE, failed: 0, skipped: 2 }]);
+  });
+});
+
+describe('the total of a media download (UI spec 2b)', () => {
+  const total = (q: Queue) => jobAt(q, 0).bytesTotal;
+
+  it('clears a media total when a progress event says the total is unknown', () => {
+    const q = build();
+    q.add(video());
+    const id = jobAt(q, 0).id;
+    media.emit({ jobId: id, type: 'progress', bytesDone: 10, bytesTotal: 100, speed: 5, eta: 18 });
+    expect(total(q)).toBe(100);
+    media.emit({ jobId: id, type: 'progress', bytesDone: 20, bytesTotal: null, speed: 5, eta: null });
+    expect(total(q)).toBeNull();
+    expect(jobAt(q, 0).bytesDone).toBe(20);
+  });
+
+  it('takes the next stream total once it is known again', () => {
+    const q = build();
+    q.add(video());
+    const id = jobAt(q, 0).id;
+    media.emit({ jobId: id, type: 'progress', bytesDone: 10, bytesTotal: 100, speed: 5, eta: 18 });
+    media.emit({ jobId: id, type: 'progress', bytesDone: 0, bytesTotal: null, speed: 0, eta: null });
+    media.emit({ jobId: id, type: 'progress', bytesDone: 3, bytesTotal: 40, speed: 1, eta: 37 });
+    expect(total(q)).toBe(40);
+  });
+
+  it('keeps a file total when a progress event says the total is unknown', () => {
+    const q = build();
+    q.add(fileReq());
+    const id = jobAt(q, 0).id;
+    expect(total(q)).toBe(5000); // the size the probe gave
+    file.emit({ jobId: id, type: 'progress', bytesDone: 10, bytesTotal: null, speed: 5, eta: null });
+    expect(total(q)).toBe(5000);
+    file.emit({ jobId: id, type: 'progress', bytesDone: 20, bytesTotal: 6000, speed: 5, eta: null });
+    file.emit({ jobId: id, type: 'progress', bytesDone: 30, bytesTotal: null, speed: 5, eta: null });
+    expect(total(q)).toBe(6000);
+  });
+
+  it('a media download that finishes after an unknown total keeps its done bytes', () => {
+    const q = build();
+    q.add(video());
+    const id = jobAt(q, 0).id;
+    media.emit({ jobId: id, type: 'progress', bytesDone: 10, bytesTotal: 100, speed: 5, eta: 18 });
+    media.emit({ jobId: id, type: 'progress', bytesDone: 70, bytesTotal: null, speed: 5, eta: null });
+    media.emit({ jobId: id, type: 'done', fileName: 'Talk.mp4', actualHeight: 720 });
+    expect(jobAt(q, 0)).toMatchObject({ state: 'done', bytesDone: 70, bytesTotal: null });
   });
 });

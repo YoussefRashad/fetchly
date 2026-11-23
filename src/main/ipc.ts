@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { isLanguageSetting, isThemeSetting } from '../shared/i18n';
 import {
   type AddRequest,
   type AppStatus,
@@ -265,10 +266,13 @@ export function createHandlers(deps: HandlerDeps) {
     setSettings: (s: Settings): Promise<Result<Settings>> =>
       guarded(async () => {
         if (!isObject(s)) return fail(BAD_REQUEST);
+        if (!isLanguageSetting(s.language) || !isThemeSetting(s.theme)) return fail(BAD_REQUEST);
         if (!isAbsoluteDir(s.downloadDir)) return fail('Choose a download folder');
         if (!isQuality(s.defaultQuality)) return fail(BAD_REQUEST);
         if (!isLangList(s.subtitleLangs)) return fail('Subtitle languages must be codes like en or ar');
         const next = normalizeSettings({
+          language: s.language,
+          theme: s.theme,
           downloadDir: s.downloadDir,
           askEveryTime: s.askEveryTime === true,
           maxConcurrent: Number(s.maxConcurrent),

@@ -3,15 +3,28 @@
   --bg: #f6f7f9;
   --panel: #ffffff;
   --text: #1c2026;
-  --muted: #667085;
+  --muted: #5c667a;
   --line: #e1e4ea;
+  /* The border of text fields and selects only: 3:1 against the panel. */
+  --field: #858e9d;
   --accent: #1f6feb;
   --accent-text: #ffffff;
   --ok: #1a7f37;
   --bad: #c62828;
   --warn: #b26a00;
   --bar: #e4e7ec;
-  font: 14px/1.45 'Segoe UI', system-ui, sans-serif;
+  font: 14px/1.45 'Segoe UI', Tahoma, system-ui, sans-serif;
+}
+
+/* Arabic script needs more size and line height to read as well as Latin at 14px. */
+:root:lang(ar) {
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+/* Arabic has no italics (and no letter-spacing is used anywhere). */
+:lang(ar) em {
+  font-style: normal;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -21,6 +34,7 @@
     --text: #e6e8ec;
     --muted: #98a2b3;
     --line: #2e323b;
+    --field: #697586;
     --accent: #4c8dff;
     --accent-text: #0b1220;
     --ok: #4ac26b;
@@ -81,10 +95,15 @@ input[type='text'],
 input[type='number'],
 select {
   background: var(--panel);
-  border: 1px solid var(--line);
+  border: 1px solid var(--field);
   border-radius: 6px;
   padding: 6px 8px;
   min-width: 0;
+}
+
+/* A left-to-right field (link, path, codes, numbers) keeps an Arabic placeholder on the right. */
+[dir='rtl'] input[dir='ltr']:placeholder-shown {
+  direction: rtl;
 }
 
 :focus-visible {
@@ -143,7 +162,7 @@ small {
 }
 
 .filters .speed {
-  margin-left: auto;
+  margin-inline-start: auto;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
@@ -162,7 +181,7 @@ small {
 
 /* Persistent banners (engine, save, cut-off): no close button; they go when their cause does. */
 .banner.persistent {
-  border-left-width: 4px;
+  border-inline-start-width: 4px;
 }
 
 .banner.persistent button {
@@ -202,15 +221,21 @@ ul {
 .job-main,
 .group-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 80px minmax(110px, 220px) auto;
+  /* The name keeps at least 120px: at the narrowest window the status gives way first. */
+  grid-template-columns: minmax(120px, 1fr) 56px 136px minmax(110px, 180px) auto;
   gap: 10px;
   align-items: center;
   padding: 8px 10px;
 }
 
 .group-head {
-  grid-template-columns: auto minmax(0, 1fr) 80px minmax(110px, 220px) auto;
+  grid-template-columns: auto minmax(120px, 1fr) 56px 136px minmax(110px, 180px) auto;
   font-weight: 600;
+}
+
+/* Room for the widest set of buttons (a finished download's), so every row's columns line up. */
+.job-main .job-actions {
+  min-width: 156px;
 }
 
 .twisty {
@@ -219,12 +244,26 @@ ul {
   padding: 0 4px;
 }
 
+/* Only the collapsed arrow points along the text; the open one points down in both directions. */
+[dir='rtl'] .twisty[aria-expanded='false'] {
+  transform: scaleX(-1);
+}
+
 .group ul .job {
   border-top: 1px solid var(--line);
-  padding-left: 22px;
+  padding-inline-start: 22px;
 }
 
 .job-name {
+  /* The cell keeps the page's direction, so every name starts at the cell's start edge. */
+  min-width: 0;
+}
+
+/* The name's own box (dir="auto") sits at that start edge and is cut at its own reading direction's end. */
+.job-name-text {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -237,6 +276,25 @@ ul {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Same metric size in both languages, so the columns hold their widths in Arabic. */
+.job-quality,
+.job-size {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The meter: the done figure reads first; the slash, size and unit stay quiet. Never cut. */
+.job-size {
+  color: var(--muted);
+  text-align: end;
+  white-space: nowrap;
+}
+
+.job-size .size-done {
+  color: var(--text);
+  font-weight: 600;
 }
 
 .state-done .job-status {
@@ -326,7 +384,8 @@ ul {
   gap: 8px;
 }
 
-.row input {
+.row input,
+.row > label {
   flex: 1;
 }
 
@@ -369,7 +428,7 @@ ul {
 .entries .num {
   color: var(--muted);
   min-width: 2.5em;
-  text-align: right;
+  text-align: end;
   font-variant-numeric: tabular-nums;
 }
 

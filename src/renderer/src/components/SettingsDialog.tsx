@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { isLanguageSetting, isThemeSetting } from '../../../shared/i18n';
 import type { BinStatus, Settings } from '../../../shared/types';
 import { S } from '../strings';
 import { decodeQuality, encodeQuality, parseLangs, qualityOptions } from './quality';
@@ -50,10 +51,35 @@ export function SettingsDialog({ settings, onSaved, onClose }: Props) {
       <div className="dialog">
         <h2>{S.settingsTitle}</h2>
 
+        <h3>{S.appearance}</h3>
+        <div className="row">
+          <label>
+            {S.language}
+            <select value={draft.language} onChange={(e) => isLanguageSetting(e.target.value) && set('language', e.target.value)}>
+              <option value="system">{S.languageSystem}</option>
+              {/* Each language is named in itself, so it can be found from either. */}
+              <option value="en" lang="en">
+                English
+              </option>
+              <option value="ar" lang="ar">
+                العربية
+              </option>
+            </select>
+          </label>
+          <label>
+            {S.theme}
+            <select value={draft.theme} onChange={(e) => isThemeSetting(e.target.value) && set('theme', e.target.value)}>
+              <option value="system">{S.themeSystem}</option>
+              <option value="light">{S.themeLight}</option>
+              <option value="dark">{S.themeDark}</option>
+            </select>
+          </label>
+        </div>
+
         <label>
           {S.downloadDir}
           <span className="row">
-            <input type="text" value={draft.downloadDir} onChange={(e) => set('downloadDir', e.target.value)} spellCheck={false} />
+            <input type="text" dir="ltr" value={draft.downloadDir} onChange={(e) => set('downloadDir', e.target.value)} spellCheck={false} />
             <button type="button" onClick={() => void browse()}>
               {S.browse}
             </button>
@@ -68,6 +94,7 @@ export function SettingsDialog({ settings, onSaved, onClose }: Props) {
           {S.maxConcurrent}
           <input
             type="number"
+            dir="ltr"
             min={1}
             max={8}
             value={draft.maxConcurrent}
@@ -78,6 +105,7 @@ export function SettingsDialog({ settings, onSaved, onClose }: Props) {
           {S.speedLimit}
           <input
             type="number"
+            dir="ltr"
             min={0}
             step={50}
             value={draft.speedLimitKbps}
@@ -98,7 +126,7 @@ export function SettingsDialog({ settings, onSaved, onClose }: Props) {
         </label>
         <label>
           {S.defaultSubtitles}
-          <input type="text" value={langs} onChange={(e) => setLangs(e.target.value)} spellCheck={false} />
+          <input type="text" dir="ltr" value={langs} onChange={(e) => setLangs(e.target.value)} spellCheck={false} />
           <small>{S.subtitlesHint}</small>
         </label>
         <label className="check">

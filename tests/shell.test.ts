@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { shellStrings } from '../src/main/shellStrings';
 import { finishedMessage, trayIconBitmap, trayTooltip } from '../src/main/shellText';
 import { makeJob } from './helpers';
 
@@ -35,6 +36,49 @@ describe('trayTooltip', () => {
   it('counts the downloads that are running', () => {
     const jobs = [makeJob({ state: 'downloading' }), makeJob({ state: 'probing' }), makeJob({ state: 'queued' }), makeJob({ state: 'paused' })];
     expect(trayTooltip({ jobs, groups: [] })).toBe('Fetchly · 2 downloading');
+  });
+});
+
+describe('finishedMessage and trayTooltip in Arabic', () => {
+  const isolated = (t: string) => `⁨${t}⁩`;
+
+  it('names a finished, failed or skipped download, with the title isolated', () => {
+    expect(finishedMessage({ kind: 'job', title: 'Talk', failed: 0, skipped: 0 }, 'ar')).toEqual({ title: 'اكتمل التنزيل', body: isolated('Talk') });
+    expect(finishedMessage({ kind: 'job', title: 'Talk', failed: 1, skipped: 0 }, 'ar')).toEqual({ title: 'فشل التنزيل', body: isolated('Talk') });
+    expect(finishedMessage({ kind: 'job', title: 'Talk', failed: 0, skipped: 1 }, 'ar')).toEqual({ title: 'تم تخطي التنزيل', body: isolated('Talk') });
+  });
+
+  it('adds only the playlist counts that are not zero', () => {
+    expect(finishedMessage({ kind: 'group', title: 'Course', failed: 0, skipped: 0 }, 'ar')).toEqual({ title: 'اكتملت قائمة التشغيل', body: isolated('Course') });
+    expect(finishedMessage({ kind: 'group', title: 'Course', failed: 2, skipped: 1 }, 'ar').body).toBe(`${isolated('Course')} · فشل 2 · تم تخطي 1`);
+  });
+
+  it('counts the running downloads', () => {
+    expect(trayTooltip({ jobs: [], groups: [] }, 'ar')).toBe('Fetchly');
+    expect(trayTooltip({ jobs: [makeJob({ state: 'downloading' }), makeJob({ state: 'probing' })], groups: [] }, 'ar')).toBe('Fetchly · 2 قيد التنزيل');
+  });
+
+  it('is English when asked for English, and by default', () => {
+    const e = { kind: 'group', title: 'Course', failed: 1, skipped: 0 } as const;
+    expect(finishedMessage(e, 'en')).toEqual(finishedMessage(e));
+    expect(finishedMessage(e)).toEqual({ title: 'Playlist finished', body: 'Course · 1 failed' });
+    const s = { jobs: [makeJob({ state: 'downloading' })], groups: [] };
+    expect(trayTooltip(s, 'en')).toBe(trayTooltip(s));
+    expect(trayTooltip(s)).toBe('Fetchly · 1 downloading');
+  });
+});
+
+describe('shellStrings', () => {
+  const path = 'C:\\Users\\me\\AppData\\Roaming\\fetchly\\jobs.json.corrupt-1';
+
+  it('words the start-up notice as before in English', () => {
+    expect(shellStrings('en').corruptNotice(path)).toBe(`The saved download list could not be read and was set aside as ${path}. The list starts empty.`);
+  });
+
+  it('isolates the path and the file name inside Arabic sentences', () => {
+    expect(shellStrings('ar').corruptNotice(path)).toContain(`\u2068${path}\u2069`);
+    expect(shellStrings('ar').runnableMessage('setup.exe')).toContain('\u2068setup.exe\u2069');
+    expect(shellStrings('en').runnableMessage('setup.exe')).toBe('"setup.exe" can run a program or change this PC when it is opened.');
   });
 });
 

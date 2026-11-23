@@ -740,6 +740,67 @@ describe('parseSettings', () => {
   it('returns the defaults for an empty object', () => {
     expect(parseSettings({}, defaults)).toEqual(defaults);
   });
+
+  describe('language and theme', () => {
+    const chosen = makeSettings({ language: 'ar', theme: 'dark', maxConcurrent: 4 });
+    const BAD: [string, unknown][] = [
+      ['null', null],
+      ['a number', 1],
+      ['zero', 0],
+      ['true', true],
+      ['false', false],
+      ['empty text', ''],
+      ['an array', ['ar']],
+      ['an object', { value: 'ar' }],
+    ];
+    const BAD_LANGUAGE: [string, unknown][] = [...BAD, ['wrong case', 'AR'], ['wrong case', 'En'], ['wrong case', 'System'], ['unknown', 'fr'], ['unknown', 'auto'], ['a theme value', 'dark']];
+    const BAD_THEME: [string, unknown][] = [...BAD, ['wrong case', 'Dark'], ['wrong case', 'LIGHT'], ['wrong case', 'System'], ['unknown', 'auto'], ['unknown', 'fr'], ['a language value', 'ar']];
+
+    it.each(BAD_LANGUAGE)('a language that is %s (%j) falls back to system alone', (_what, bad) => {
+      expect(parseSettings({ ...chosen, language: bad }, defaults)).toEqual({ ...chosen, language: 'system' });
+    });
+
+    it.each(BAD_THEME)('a theme that is %s (%j) falls back to system alone', (_what, bad) => {
+      expect(parseSettings({ ...chosen, theme: bad }, defaults)).toEqual({ ...chosen, theme: 'system' });
+    });
+
+    it('a missing field falls back to system alone', () => {
+      const noLanguage: Record<string, unknown> = { ...chosen };
+      delete noLanguage['language'];
+      const noTheme: Record<string, unknown> = { ...chosen };
+      delete noTheme['theme'];
+      expect(parseSettings(noLanguage, defaults)).toEqual({ ...chosen, language: 'system' });
+      expect(parseSettings(noTheme, defaults)).toEqual({ ...chosen, theme: 'system' });
+    });
+
+    it('both invalid fall back each to its own default and nothing else changes', () => {
+      expect(parseSettings({ ...chosen, language: 'Arabic', theme: 'night' }, defaults)).toEqual({ ...chosen, language: 'system', theme: 'system' });
+    });
+
+    it.each(['system', 'en', 'ar'] as const)('the language %s round-trips', (language) => {
+      const saved = makeSettings({ language, theme: 'light' });
+      expect(parseSettings(JSON.parse(JSON.stringify(saved)), defaults)).toEqual(saved);
+    });
+
+    it.each(['system', 'light', 'dark'] as const)('the theme %s round-trips', (theme) => {
+      const saved = makeSettings({ language: 'en', theme });
+      expect(parseSettings(JSON.parse(JSON.stringify(saved)), defaults)).toEqual(saved);
+    });
+
+    it('a settings file written before these fields existed loads, with both on system', () => {
+      const old = {
+        downloadDir: 'D:\\Old',
+        askEveryTime: true,
+        maxConcurrent: 2,
+        speedLimitKbps: 100,
+        autoResumeOnStart: true,
+        preferMp4Max1080: false,
+        defaultQuality: { kind: 'max', height: 720 },
+        subtitleLangs: ['ar'],
+      };
+      expect(parseSettings(old, defaults)).toEqual({ ...old, language: 'system', theme: 'system' });
+    });
+  });
 });
 
 describe('normalizeSettings (A8)', () => {

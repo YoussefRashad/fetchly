@@ -68,7 +68,7 @@ export function AddDialog({ url, probe, settings, onClose }: Props) {
         {probe.kind === 'file' ? (
           <>
             <p>
-              {S.fileSize}: {formatBytes(probe.size)}
+              {S.fileSize}: <bdi dir="ltr">{formatBytes(probe.size)}</bdi>
             </p>
             {!probe.resumable && <p className="note">{S.cannotResume}</p>}
           </>
@@ -86,7 +86,7 @@ export function AddDialog({ url, probe, settings, onClose }: Props) {
             </label>
             <label>
               {S.subtitles}
-              <input type="text" value={langs} onChange={(e) => setLangs(e.target.value)} spellCheck={false} />
+              <input type="text" dir="ltr" value={langs} onChange={(e) => setLangs(e.target.value)} spellCheck={false} />
               <small>{S.subtitlesHint}</small>
             </label>
           </>
@@ -126,7 +126,7 @@ export function AddDialog({ url, probe, settings, onClose }: Props) {
         <label>
           {S.folder}
           <span className="row">
-            <input type="text" value={dir} onChange={(e) => setDir(e.target.value)} spellCheck={false} />
+            <input type="text" dir="ltr" value={dir} onChange={(e) => setDir(e.target.value)} spellCheck={false} />
             <button type="button" onClick={() => void browse()}>
               {S.browse}
             </button>
