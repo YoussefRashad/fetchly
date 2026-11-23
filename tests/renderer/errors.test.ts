@@ -1,5 +1,5 @@
 // Task D, item 2: the window turns the error codes of the main process into text of the language in use
-// (frozen plan docs/plans/2026-11-23-d-housekeeping.md, "Window rules" and critique pass 2, amendments 1, 3 and 8).
+// (frozen plan docs/plans/2026-11-23-d-housekeeping.md, "Window rules" and critique pass 2, amendments 1, 3, 8 and 9).
 //
 // Fields enumerated (src/renderer/src/errors.ts): errorText(ErrorInfo { error, code?, detail? }),
 // statusMessage(error variant of EngineStatus { message, code?, detail? } or ServerStatus { message, code?, port? }),
@@ -10,6 +10,7 @@
 // code, a save error that is exactly the prefix, an error or message that is not a string).
 import { afterEach, describe, expect, it } from 'vitest';
 import { errorText, noticeText, saveErrorText, settingsOutcome, statusMessage, type Notice } from '../../src/renderer/src/errors';
+import { knownReason, reasonText } from '../../src/renderer/src/format';
 import { S, setLanguage } from '../../src/renderer/src/strings';
 import { SAVE_FAILED_PREFIX } from '../../src/shared/errors';
 import { fsi } from '../../src/shared/i18n';
@@ -209,6 +210,59 @@ describe('errorText: linkProblem carries a reason token', () => {
 
   it('a retry count is turned into words', () => {
     expect(both(() => errorText(info({ error: 'retrying (2/3)', code: 'linkProblem' })))).toEqual(['retrying (2/3)', 'إعادة المحاولة (2/3)']);
+  });
+
+  // Amendment 9 (replaces the `reason` bullet of "Window rules > errorText"): a retry count is turned into words only when both
+  // numbers are canonical decimal (`0|[1-9]\d{0,14}`: no leading zero, at most 15 digits). Anything else is shown as it came, so in
+  // English errorText equals `error` (plan line 402) and no number is rewritten by Number() (`02` -> `2`, 9007199254740993 -> ...992).
+  const retryAr = (attempt: string, max: string): string => `إعادة المحاولة (${attempt}/${max})`;
+
+  describe('a retry count whose number is not canonical decimal is shown as it came (amendment 9)', () => {
+    it.each<[string, string]>([
+      ['a leading zero in both numbers', 'retrying (02/03)'],
+      ['a leading zero in the first number only', 'retrying (02/3)'],
+      ['a leading zero in the second number only', 'retrying (2/03)'],
+      ['zero written twice, first number', 'retrying (00/3)'],
+      ['zero written twice, second number', 'retrying (2/00)'],
+      ['a leading zero before a longer number', 'retrying (007/12)'],
+      ['16 digits in the first number, more than a double keeps', 'retrying (9007199254740993/3)'],
+      ['16 digits in the second number, more than a double keeps', 'retrying (2/9007199254740993)'],
+      ['16 digits that a double prints back exactly, first number', 'retrying (1000000000000000/3)'],
+      ['16 digits that a double prints back exactly, second number', 'retrying (2/1000000000000000)'],
+      ['16 digits in both numbers', 'retrying (1000000000000000/1000000000000000)'],
+      ['17 digits', 'retrying (10000000000000000/3)'],
+    ])('%s: %j is shown as it came, inside one isolate in Arabic', (_name, text) => {
+      expect(both(() => errorText(info({ error: text, code: 'linkProblem' })))).toEqual(other(text));
+    });
+
+    it.each<[string, string, string]>([
+      ['a plain count', 'retrying (2/3)', retryAr('2', '3')],
+      ['two digits in both numbers', 'retrying (10/12)', retryAr('10', '12')],
+      ['0 in the first number', 'retrying (0/3)', retryAr('0', '3')],
+      ['0 in the second number', 'retrying (2/0)', retryAr('2', '0')],
+      ['0 in both numbers', 'retrying (0/0)', retryAr('0', '0')],
+      ['15 digits in the first number, the longest allowed', 'retrying (999999999999999/3)', retryAr('999999999999999', '3')],
+      ['15 digits in the second number, the longest allowed', 'retrying (2/100000000000000)', retryAr('2', '100000000000000')],
+      ['15 digits in both numbers', 'retrying (100000000000000/999999999999999)', retryAr('100000000000000', '999999999999999')],
+    ])('%s: %j is still translated in Arabic, and English equals the text', (_name, text, ar) => {
+      expect(both(() => errorText(info({ error: text, code: 'linkProblem' })))).toEqual([text, ar]);
+    });
+
+    it('the Arabic fallback of a rejected count sits inside exactly one isolate', () => {
+      setLanguage('ar');
+      const text = errorText(info({ error: 'retrying (02/03)', code: 'linkProblem' }));
+      expect(count(text, '⁨')).toBe(1);
+      expect(count(text, '⁩')).toBe(1);
+      expect(text).toBe(fsi('retrying (02/03)'));
+    });
+
+    it('a job reason is unchanged: reasonText and knownReason still give "retrying (2/3)" for "retrying (02/03)" (the job-reason path is pinned)', () => {
+      expect(reasonText('retrying (02/03)')).toBe('retrying (2/3)');
+      expect(knownReason('retrying (02/03)')).toBe('retrying (2/3)');
+      setLanguage('ar');
+      expect(reasonText('retrying (02/03)')).toBe(retryAr('2', '3'));
+      expect(knownReason('retrying (02/03)')).toBe(retryAr('2', '3'));
+    });
   });
 
   it('"server answered 503" is turned into words, the number inside an isolate', () => {
@@ -491,7 +545,16 @@ describe('in English, errorText equals the English `error` of every coded failur
     expect(errorText(info({ error: en(raw), code, detail: raw }))).toBe(en(raw));
   });
 
-  it.each(['timed out reading the link', 'retrying (2/3)', 'server answered 503', 'server answered 007', 'a text no table knows'])(
+  it.each([
+    'timed out reading the link',
+    'retrying (2/3)',
+    'retrying (02/03)',
+    'retrying (2/03)',
+    'retrying (1000000000000000/3)',
+    'server answered 503',
+    'server answered 007',
+    'a text no table knows',
+  ])(
     'linkProblem with %j',
     (reason) => {
       expect(errorText(info({ error: reason, code: 'linkProblem' }))).toBe(reason);

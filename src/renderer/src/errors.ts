@@ -27,14 +27,26 @@ export interface SettingsOutcome {
 /** A link-probe reason with a status number; the digits are kept as text, so English equals the reason (`007`). */
 const SERVER_ANSWERED = /^server answered (\d+)$/u;
 
+/** A retry reason, to check that both numbers are canonical decimals before the shared table turns them into words. */
+const RETRYING = /^retrying \((\d+)\/(\d+)\)$/u;
+
+/** A canonical decimal: no leading zero, at most 15 digits (so Number() keeps every digit). */
+const CANONICAL = /^(?:0|[1-9]\d{0,14})$/u;
+
 /** The text as it came when it is a string, else empty text (never the word "undefined"). */
 const textOf = (v: unknown): string => (typeof v === 'string' ? v : '');
 
 /** The code when it is an own key of ERROR_CODES (never a prototype name), else null. */
 const codeOf = (v: unknown): ErrorCode | null => (typeof v === 'string' && Object.hasOwn(ERROR_CODES, v) ? (v as ErrorCode) : null);
 
-/** A link-probe reason: its table entry or retry count, else "server answered <n>", else the text as it came. */
+/**
+ * A link-probe reason: its table entry or retry count, else "server answered <n>", else the text as it came. A retry
+ * whose number is not a canonical decimal (a leading zero, or more than 15 digits that Number() would round) is kept
+ * as it came, so the words never show a number the text does not say. Job reasons (format.ts) keep their behaviour.
+ */
 function reasonOf(text: string): string {
+  const retry = RETRYING.exec(text);
+  if (retry && !(CANONICAL.test(retry[1] as string) && CANONICAL.test(retry[2] as string))) return S.errors.other(text);
   const known = knownReason(text);
   if (known !== null) return known;
   const answered = SERVER_ANSWERED.exec(text);

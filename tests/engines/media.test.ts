@@ -674,7 +674,8 @@ describe('MediaEngine height check before a Best download', () => {
 // Task D, item 4 (frozen plan docs/plans/2026-11-23-d-housekeeping.md, "Item 4"). A height check whose output passes
 // the cap ends its child once (killChild) and the job downloads with no known height (mkv, `bv*+ba/b`), whatever the
 // time limit, the exit code or a signal say; a pending stop still wins. The download starts only on the child's
-// 'close'. Specs 2-8 use a 1 KiB cap (`probeOutputCap`), so none of them moves 64 MiB.
+// 'close'. Specs 2-8 use a 1 KiB cap (`probeOutputCap`), so none of them moves 64 MiB. Amendment 10 makes spec 5 assert the kill
+// order; amendment 11 adds specs 10 and 11 for the failing fallback and the second run (docs/plans/2026-11-23-d-housekeeping-amendment-1.md).
 describe('MediaEngine height check over the output cap (Task D, item 4)', () => {
   const SMALL_CAP = 1024;
   const OVER = paddedProbe(SMALL_CAP + 1);
@@ -746,14 +747,28 @@ describe('MediaEngine height check over the output cap (Task D, item 4)', () => 
     expect(kills[1]).toBe(kills[0]);
   }, BUDGET);
 
-  it('5. the cap, then the time limit: the timer kills again, and over-cap still wins over the time limit', async () => {
+  // Amendment 10 (review finding 2): spec 5 asserts the order. The first kill is the cap kill and comes before the time limit; the
+  // second is the timer's, at or after it, and kills the same child. Elapsed time is the one clock the plan allows here. A red run
+  // on a loaded machine is re-run alone before it counts.
+  it('5. the cap kills first, before the time limit; the timer then kills the same child again; over-cap still wins over the time limit', async () => {
+    const TIME_LIMIT = 3000;
     killWorks = false;
     const probe = overCapProbe({ output: OVER, end: 'hang' });
-    makeEngine({ probeOutputCap: SMALL_CAP, probeTimeoutMs: 300 }, probe.exe);
+    makeEngine({ probeOutputCap: SMALL_CAP, probeTimeoutMs: TIME_LIMIT }, probe.exe);
     const lines = argsLog();
+    const t0 = Date.now();
     start('ok');
-    await waitFor(() => kills.length === 2, LONG); // the cap kill and the timer kill, in whichever order a slow start gives
-    expect(kills[1]).toBe(kills[0]);
+    await waitFor(() => kills.length >= 1, LONG);
+    const firstKillAfter = Date.now() - t0;
+    expect(kills, 'only the first kill so far').toHaveLength(1);
+    expect(firstKillAfter, 'the first kill is the cap kill: it comes before the time limit').toBeLessThan(TIME_LIMIT);
+    expect(kills[0]?.spawnargs, 'the first kill is the height check').toContain('-J');
+    expect(lines()).toEqual([]);
+    expect(events).toEqual([]);
+    await waitFor(() => kills.length >= 2, LONG);
+    const secondKillAfter = Date.now() - t0;
+    expect(secondKillAfter, 'the second kill is the timer: it comes at or after the time limit').toBeGreaterThanOrEqual(TIME_LIMIT);
+    expect(kills[1], 'the timer kills the same child').toBe(kills[0]);
     expect(lines()).toEqual([]);
     expect(events).toEqual([]);
     kills[0]?.kill(); // the tree finally ends, by hand
@@ -853,6 +868,89 @@ describe('MediaEngine height check over the output cap (Task D, item 4)', () => 
     await sleep(200);
     expect(lines()).toEqual([]);
     expect(kills).toHaveLength(0);
+  }, BUDGET);
+
+  // Amendment 11 (review finding 3), edge cases of the plan's "Edge cases" list that had no spec.
+  // The fallback download ends with the stand-in's own failure: 'private' (outcome skipped, not retryable). It is not one of the
+  // reasons the height check itself could give (unreadable, time limit, login required), so a mix-up of the two shows.
+  const FALLBACK_FAILURE = { type: 'error', outcome: 'skipped', reason: 'private', retryable: false } as const;
+  // The one job-wide fact both specs rely on: the job is not probed again only when it has data (bytesDone > 0). That counterpart
+  // is covered by 'skips the height check for a job that already has data' in 'MediaEngine height check' above.
+
+  // 3a: the fallback fails. Its own reason is the one error; no probed event, one mkv download line, one kill.
+  it.each<{ name: string; killOn: boolean; end: ProbeEnd; stderr: string }>([
+    { name: 'the kill ends the child by signal', killOn: true, end: 'hang', stderr: '' },
+    { name: 'the child exits 0 by itself and the kill does nothing', killOn: false, end: { exit: 0 }, stderr: '' },
+    {
+      name: 'the child exits 1 with "ERROR: Sign in" on stderr and the kill does nothing',
+      killOn: false,
+      end: { exit: 1 },
+      stderr: 'ERROR: Sign in\n',
+    },
+  ])('10. (amendment 11, 3a) the fallback download fails, $name: its own reason is the one error', async ({ killOn, end, stderr }) => {
+    killWorks = killOn;
+    const probe = overCapProbe({ output: OVER, stderr, end });
+    makeEngine({ probeOutputCap: SMALL_CAP }, probe.exe);
+    const lines = argsLog();
+    const job = start('private');
+    expect(await waitFor(ended, LONG)).toEqual({ jobId: job.id, ...FALLBACK_FAILURE });
+    await sleep(200); // nothing follows the failure
+    // Exactly this one event: not "could not read the video information", "timed out reading the link" or "login required",
+    // no second error, no probed.
+    expect(events).toEqual([{ jobId: job.id, ...FALLBACK_FAILURE }]);
+    expectMkvFallback(lines());
+    expect(probe.aliveAtDownload()).toEqual([false]);
+    expect(kills, 'the cap kill, once').toHaveLength(1);
+    expect(kills[0]?.spawnargs, 'the one kill is the height check').toContain('-J');
+  }, BUDGET);
+
+  it('10b. (amendment 11, 3a) the fallback download fails after the time limit also fired: still its own reason, not "timed out reading the link"', async () => {
+    killWorks = false;
+    const probe = overCapProbe({ output: OVER, end: 'hang' });
+    makeEngine({ probeOutputCap: SMALL_CAP, probeTimeoutMs: 300 }, probe.exe);
+    const lines = argsLog();
+    const job = start('private');
+    await waitFor(() => kills.length >= 2, LONG); // the cap kill and the timer kill; neither ends the child
+    expect(lines()).toEqual([]);
+    kills[0]?.kill(); // the tree finally ends, by hand
+    expect(await waitFor(ended, LONG)).toEqual({ jobId: job.id, ...FALLBACK_FAILURE });
+    await sleep(200);
+    expect(events).toEqual([{ jobId: job.id, ...FALLBACK_FAILURE }]);
+    expectMkvFallback(lines());
+    expect(probe.aliveAtDownload()).toEqual([false]);
+    expect(kills).toHaveLength(2);
+    expect(kills[1]).toBe(kills[0]);
+  }, BUDGET);
+
+  // 3b: a second run of the same job (bytesDone is still 0) is probed again, cut at the cap again and falls back again.
+  it('11. (amendment 11, 3b) a second run with bytesDone 0 spawns a second height check, kills it at the cap, and downloads again with no known height', async () => {
+    const probe = overCapProbe({ output: OVER, end: 'hang' });
+    makeEngine({ probeOutputCap: SMALL_CAP }, probe.exe);
+    const lines = argsLog();
+    const job = start('private');
+    expect(await waitFor(ended, LONG)).toEqual({ jobId: job.id, ...FALLBACK_FAILURE });
+    expect(job.bytesDone, 'the job to run again has no data').toBe(0);
+    expect(job.sourceHeight).toBeNull();
+    expect(kills).toHaveLength(1);
+    expectMkvFallback(lines());
+
+    engine.start(job, ctx); // the same job again, as a re-queue does
+    await waitFor(() => errorEvents().length >= 2, LONG);
+    await sleep(200); // nothing follows the second failure
+    expect(kills, 'one kill for each run').toHaveLength(2);
+    const [first, second] = kills;
+    expect(second, 'a different child from the first').not.toBe(first);
+    expect(second?.pid).not.toBe(first?.pid);
+    expect(first?.spawnargs).toContain('-J');
+    expect(second?.spawnargs, 'the second run spawned its own height check').toContain('-J');
+    expect(probe.aliveAtDownload(), 'each download began after its height check had ended').toEqual([false, false]);
+    const all = lines();
+    expect(all, 'a second download line').toHaveLength(2);
+    for (const line of all) expectMkvFallback([line]);
+    expect(events, 'two failures of its own, no probed').toEqual([
+      { jobId: job.id, ...FALLBACK_FAILURE },
+      { jobId: job.id, ...FALLBACK_FAILURE },
+    ]);
   }, BUDGET);
 });
 
