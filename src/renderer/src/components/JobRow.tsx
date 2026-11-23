@@ -1,6 +1,6 @@
 import { Fragment } from 'react';
 import type { Job, JobVerb } from '../../../shared/types';
-import { allowedVerbs, percent, qualityLabel, sizeParts, statusParts, statusText } from '../format';
+import { addedText, addedTitle, allowedVerbs, etaText, percent, qualityLabel, sizeParts, speedText, statusParts, statusText } from '../format';
 import { S } from '../strings';
 
 const ICONS: Record<JobVerb, string> = {
@@ -67,6 +67,11 @@ export function JobRow({ job, onError }: Props) {
               <bdi>{part}</bdi>
             </Fragment>
           ))}
+        </span>
+        <span className="job-speed">{speedText(job) !== '' && <bdi dir="ltr">{speedText(job)}</bdi>}</span>
+        <span className="job-eta">{etaText(job) !== '' && <bdi dir="ltr">{etaText(job)}</bdi>}</span>
+        <span className="job-added" title={addedTitle(job.createdAt)}>
+          <bdi>{addedText(job.createdAt)}</bdi>
         </span>
         <span className="job-actions">
           {job.state === 'done' && (

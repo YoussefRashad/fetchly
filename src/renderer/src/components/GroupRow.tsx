@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { Group, GroupVerb, Job } from '../../../shared/types';
-import { groupSummary } from '../format';
+import { addedText, addedTitle, formatSpeed, groupSummary } from '../format';
 import { S } from '../strings';
 import { JobRow } from './JobRow';
 
@@ -16,6 +16,8 @@ interface Props {
 export function GroupRow({ group, members, visible, onError }: Props) {
   const [open, setOpen] = useState(true);
   const summary = groupSummary(members);
+  // The playlist's speed is the sum of its items that are downloading now.
+  const groupSpeed = formatSpeed(members.reduce((sum, j) => sum + (j.state === 'downloading' ? j.speed : 0), 0));
   const canPause = members.some((j) => j.state === 'queued' || j.state === 'probing' || j.state === 'downloading');
   const canResume = members.some((j) => j.state === 'paused');
   const unfinished = members.some((j) => j.state !== 'done' && j.state !== 'skipped' && j.state !== 'failed');
@@ -42,6 +44,11 @@ export function GroupRow({ group, members, visible, onError }: Props) {
         </span>
         <span className="job-size" />
         <span className="job-status">{summary.percent}%</span>
+        <span className="job-speed">{groupSpeed !== '' && <bdi dir="ltr">{groupSpeed}</bdi>}</span>
+        <span className="job-eta" />
+        <span className="job-added" title={addedTitle(group.createdAt)}>
+          <bdi>{addedText(group.createdAt)}</bdi>
+        </span>
         <span className="job-actions">
           {canPause && (
             <button type="button" onClick={() => void act('pause')} title={S.groupVerbs.pause} aria-label={S.groupVerbs.pause}>

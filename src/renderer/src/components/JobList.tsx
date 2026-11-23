@@ -39,5 +39,21 @@ export function JobList({ snapshot, filter, onError }: Props) {
   }
 
   if (rows.length === 0) return <div className="empty">{S.emptyFilter}</div>;
-  return <ul className="jobs">{rows}</ul>;
+  const c = S.columns;
+  return (
+    <>
+      {/* The headings use the rows' own grid, so each one sits over its column in both directions. */}
+      <div className="jobs-head" aria-hidden="true">
+        <span className="job-name">{c.name}</span>
+        <span className="job-quality">{c.quality}</span>
+        <span className="job-size">{c.size}</span>
+        <span className="job-status">{c.status}</span>
+        <span className="job-speed">{c.speed}</span>
+        <span className="job-eta">{c.timeLeft}</span>
+        <span className="job-added">{c.added}</span>
+        <span className="job-actions" />
+      </div>
+      <ul className="jobs">{rows}</ul>
+    </>
+  );
 }
