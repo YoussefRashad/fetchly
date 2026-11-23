@@ -81,12 +81,23 @@ describe('start resolves with a decided status', () => {
 
   it('injected EACCES: error with the S16 text naming the port', async () => {
     const b = await bootServer({ port: 38917, onServer: (s) => setListen(s, listenError(s, 'EACCES')) });
-    expect(b.running.status()).toEqual({ state: 'error', message: 'port 38917 cannot be used on this PC; choose another in Settings' });
+    // portUnusable: the English text unchanged, the code, and the requested port for the window to translate.
+    expect(b.running.status()).toEqual({
+      state: 'error',
+      message: 'port 38917 cannot be used on this PC; choose another in Settings',
+      code: 'portUnusable',
+      port: 38917,
+    });
   });
 
   it('the EACCES text names the requested port, whatever it is', async () => {
     const b = await bootServer({ port: 4242, onServer: (s) => setListen(s, listenError(s, 'EACCES')) });
-    expect(b.running.status()).toEqual({ state: 'error', message: 'port 4242 cannot be used on this PC; choose another in Settings' });
+    expect(b.running.status()).toEqual({
+      state: 'error',
+      message: 'port 4242 cannot be used on this PC; choose another in Settings',
+      code: 'portUnusable',
+      port: 4242,
+    });
   });
 
   it.each(['EINVAL', 'EPERM', 'EADDRNOTAVAIL', 'EMFILE', 'EIO'])('injected %s: error with a fixed text that carries no detail of the error', async (code) => {
@@ -99,6 +110,10 @@ describe('start resolves with a decided status', () => {
       expect(st.message).not.toContain(code);
       expect(st.message).not.toBe('port 38917 cannot be used on this PC; choose another in Settings');
     }
+    // serverStartFailed: the English text of today and its code; the detail of the error never reaches the status.
+    expect(st).toMatchObject({ state: 'error', message: 'The browser connection could not start; save Settings to try again', code: 'serverStartFailed' });
+    expect(JSON.stringify(st)).not.toContain('SECRET-DETAIL-ZZ');
+    expect(st).not.toHaveProperty('port');
   });
 
   it('an error without a code is an error with a fixed text', async () => {
@@ -106,11 +121,13 @@ describe('start resolves with a decided status', () => {
     const st = b.running.status();
     expect(st.state).toBe('error');
     expect(st.state === 'error' && st.message).not.toContain('SECRET-DETAIL-ZZ');
+    expect(st).toMatchObject({ state: 'error', message: 'The browser connection could not start; save Settings to try again', code: 'serverStartFailed' });
   });
 
   it('never rejects: a listen that throws at once (a port out of range) is an error status', async () => {
     const b = await bootServer({ port: 70000 });
     expect(b.running.status().state).toBe('error');
+    expect(b.running.status()).toMatchObject({ message: 'The browser connection could not start; save Settings to try again', code: 'serverStartFailed' });
   });
 
   it('never rejects: a createServer that throws is an error status', async () => {
@@ -122,6 +139,7 @@ describe('start resolves with a decided status', () => {
     const st = b.running.status();
     expect(st.state).toBe('error');
     expect(st.state === 'error' && st.message).not.toContain('SECRET-DETAIL-ZZ');
+    expect(st).toMatchObject({ message: 'The browser connection could not start; save Settings to try again', code: 'serverStartFailed' });
   });
 
   it('a normal start leaves no deadline behind: advancing the clock far past 3000 ms keeps it listening', async () => {
@@ -180,6 +198,8 @@ describe('a listen that never answers (S16, R2-2)', () => {
     expect(running.status().state).toBe('error');
     const st = running.status();
     expect(st.state === 'error' && st.message.length).toBeGreaterThan(0);
+    // serverStartFailed: the listen deadline gives the start-failed text and code.
+    expect(st).toMatchObject({ state: 'error', message: 'The browser connection could not start; save Settings to try again', code: 'serverStartFailed' });
   });
 
   it('closes the pending server at the deadline and discards a late "listening": no socket is left listening', async () => {
@@ -359,6 +379,7 @@ describe('leaving `listening` cancels an open code', () => {
     expect(st.state).toBe('error');
     expect(st.state === 'error' && st.message.length).toBeGreaterThan(0);
     expect(st.state === 'error' && st.message).not.toContain('SECRET-DETAIL-ZZ');
+    expect(st).toMatchObject({ message: 'The browser connection stopped working; save Settings to start it again', code: 'serverBroken' });
     expect(b.store.codeOpen()).toBe(false);
     expect(b.store.open().ok).toBe(false); // not listening: pairing is offered no more
   });
@@ -687,7 +708,7 @@ describe('stop', () => {
 // (which makes the server `current`) used to be ignored: ensure then reported `listening` for a failed server. Now the
 // gap error takes the listen-error path (EADDRINUSE -> portBusy, EACCES -> the port text, anything else -> the
 // start-failed text), the failed server is shut in the same tick and the attempt ends as that failure.
-// Error statuses are asserted with toMatchObject({ state, message }) so that a later `code` field breaks nothing.
+// Error statuses are asserted with toMatchObject({ state, message, code }): commit B added the `code` of each.
 const START_FAILED = 'The browser connection could not start; save Settings to try again';
 const BROKEN = 'The browser connection stopped working; save Settings to start it again';
 const STARTING = 'The browser connection is starting';
@@ -737,9 +758,9 @@ describe('an error between "listening" and the handover (Task D, item 1)', () =>
       s.emit('error', gapError('EIO'));
     });
     const st = await within(b.running.ensure(p2), 3000, 'ensure');
-    expect(st).toMatchObject({ state: 'error', message: START_FAILED });
+    expect(st).toMatchObject({ state: 'error', message: START_FAILED, code: 'serverStartFailed' });
     expect(b.running.status()).toEqual(st);
-    expect(b.running.status()).toMatchObject({ state: 'error', message: START_FAILED });
+    expect(b.running.status()).toMatchObject({ state: 'error', message: START_FAILED, code: 'serverStartFailed' });
   });
 
   it('2. inside the gap, right after the error, status() is still the starting error (never listening)', async () => {
@@ -750,7 +771,7 @@ describe('an error between "listening" and the handover (Task D, item 1)', () =>
     });
     await within(b.running.ensure(p2), 3000, 'ensure');
     expect(seen.status).not.toBeNull();
-    expect(seen.status).toMatchObject({ state: 'error', message: STARTING });
+    expect(seen.status).toMatchObject({ state: 'error', message: STARTING, code: 'serverStarting' });
   });
 
   it('3. the failed server is shut in the same tick (close() and closeAllConnections() before the emit returns), and its port is released', async () => {
@@ -772,12 +793,12 @@ describe('an error between "listening" and the handover (Task D, item 1)', () =>
   // The mapping is the listen-error one (D1.1), not BROKEN_TEXT: no caller ever saw this server listening.
   it.each<[string, string | number | undefined, (port: number) => object]>([
     ['EADDRINUSE: portBusy with the requested port', 'EADDRINUSE', (port) => ({ state: 'portBusy', port })],
-    ['EACCES: the port text naming the requested port', 'EACCES', (port) => ({ state: 'error', message: portText(port) })],
-    ['EIO: the start-failed text', 'EIO', () => ({ state: 'error', message: START_FAILED })],
-    ['EPERM: the start-failed text', 'EPERM', () => ({ state: 'error', message: START_FAILED })],
-    ['an error with no code: the start-failed text', undefined, () => ({ state: 'error', message: START_FAILED })],
-    ['a lower-case "eaddrinuse" is not EADDRINUSE: the start-failed text', 'eaddrinuse', () => ({ state: 'error', message: START_FAILED })],
-    ['a numeric code is not a known code: the start-failed text', 98, () => ({ state: 'error', message: START_FAILED })],
+    ['EACCES: the port text naming the requested port', 'EACCES', (port) => ({ state: 'error', message: portText(port), code: 'portUnusable', port })],
+    ['EIO: the start-failed text', 'EIO', () => ({ state: 'error', message: START_FAILED, code: 'serverStartFailed' })],
+    ['EPERM: the start-failed text', 'EPERM', () => ({ state: 'error', message: START_FAILED, code: 'serverStartFailed' })],
+    ['an error with no code: the start-failed text', undefined, () => ({ state: 'error', message: START_FAILED, code: 'serverStartFailed' })],
+    ['a lower-case "eaddrinuse" is not EADDRINUSE: the start-failed text', 'eaddrinuse', () => ({ state: 'error', message: START_FAILED, code: 'serverStartFailed' })],
+    ['a numeric code is not a known code: the start-failed text', 98, () => ({ state: 'error', message: START_FAILED, code: 'serverStartFailed' })],
   ])('4. %s', async (_name, code, want) => {
     const { b, p2 } = await bootForGap((s) => {
       s.emit('error', gapError(code));
@@ -799,7 +820,7 @@ describe('an error between "listening" and the handover (Task D, item 1)', () =>
       },
     });
     const running = await within(p.start(), 3000, 'start');
-    expect(running.status()).toMatchObject({ state: 'error', message: START_FAILED });
+    expect(running.status()).toMatchObject({ state: 'error', message: START_FAILED, code: 'serverStartFailed' });
     expect(p.store.open().ok, 'pairing is not offered on a failed server').toBe(false);
     expect(await refusesConnections(p1, 3000), 'nothing keeps the port').toBe(true);
   });
@@ -831,7 +852,7 @@ describe('an error between "listening" and the handover (Task D, item 1)', () =>
       seen.closeCalls = close.mock.calls.length;
     });
     const st = await within(b.running.ensure(p2), 3000, 'ensure');
-    expect(st).toMatchObject({ state: 'error', message: START_FAILED }); // the first error decided, the second is ignored
+    expect(st).toMatchObject({ state: 'error', message: START_FAILED, code: 'serverStartFailed' }); // the first error decided, the second is ignored
     expect(seen.closeCalls, 'the revoked server is not shut a second time').toBe(1);
   });
 
@@ -840,7 +861,7 @@ describe('an error between "listening" and the handover (Task D, item 1)', () =>
       s.emit('error', gapError('EIO'));
     });
     const failed = await within(b.running.ensure(p2), 3000, 'ensure');
-    expect(failed).toMatchObject({ state: 'error', message: START_FAILED });
+    expect(failed).toMatchObject({ state: 'error', message: START_FAILED, code: 'serverStartFailed' });
     const revoked = b.servers[1];
     if (!revoked) throw new Error('no second server');
 
@@ -900,7 +921,7 @@ describe('an error between "listening" and the handover (Task D, item 1)', () =>
     expect(seen.closeAllCalls, "closeAllConnections() on the bound server, before stop's first await").toBeGreaterThanOrEqual(1);
     expect(second.state).not.toBe('listening');
     await within(seen.stopping, 2000, 'stop');
-    expect(b.running.status()).toMatchObject({ state: 'error', message: STOPPED });
+    expect(b.running.status()).toMatchObject({ state: 'error', message: STOPPED, code: 'serverStopped' });
     expect(await refusesConnections(p2, 3000), 'nothing keeps the new port').toBe(true);
   });
 
@@ -914,7 +935,7 @@ describe('an error between "listening" and the handover (Task D, item 1)', () =>
     expect(moved.state).not.toBe('listening');
     if (!seen.stopping) throw new Error('stop was never called');
     await within(seen.stopping, 2000, 'stop');
-    expect(b.running.status()).toMatchObject({ state: 'error', message: STOPPED });
+    expect(b.running.status()).toMatchObject({ state: 'error', message: STOPPED, code: 'serverStopped' });
     expect(await refusesConnections(p2, 3000), 'nothing keeps the new port').toBe(true);
     expect(b.store.open().ok).toBe(false);
   });
@@ -929,7 +950,7 @@ describe('an error between "listening" and the handover (Task D, item 1)', () =>
     expect(moved.state).not.toBe('listening');
     if (!seen.stopping) throw new Error('stop was never called');
     await within(seen.stopping, 2000, 'stop');
-    expect(b.running.status()).toMatchObject({ state: 'error', message: STOPPED });
+    expect(b.running.status()).toMatchObject({ state: 'error', message: STOPPED, code: 'serverStopped' });
     expect(await refusesConnections(p2, 3000), 'nothing keeps the new port').toBe(true);
     expect(b.store.open().ok).toBe(false);
   });
@@ -959,7 +980,7 @@ describe('an error between "listening" and the handover (Task D, item 1)', () =>
     await within(seen.stopping, 2000, 'stop');
     expect(seen.closeEmitted, 'the deferred close() has not happened yet').toBe(false);
     expect(seen.stopSettled, "stop() did not wait for the failed server's 'close'").toBe(true);
-    expect(b.running.status()).toMatchObject({ state: 'error', message: STOPPED });
+    expect(b.running.status()).toMatchObject({ state: 'error', message: STOPPED, code: 'serverStopped' });
     expect(await refusesConnections(p2, 3000), 'the failed server still gets closed').toBe(true);
   });
 
@@ -969,7 +990,7 @@ describe('an error between "listening" and the handover (Task D, item 1)', () =>
     expect(await within(b.running.ensure(p2), 3000, 'ensure')).toEqual({ state: 'listening', port: p2 });
     expect(b.store.open().ok).toBe(true);
     b.servers[1]?.emit('error', gapError('EIO'));
-    expect(b.running.status()).toMatchObject({ state: 'error', message: BROKEN });
+    expect(b.running.status()).toMatchObject({ state: 'error', message: BROKEN, code: 'serverBroken' });
     expect(JSON.stringify(b.running.status())).not.toContain('SECRET-DETAIL-ZZ');
     expect(b.store.codeOpen()).toBe(false);
     expect(await refusesConnections(p2, 3000), 'the broken server is shut').toBe(true);

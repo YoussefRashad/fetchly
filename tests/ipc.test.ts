@@ -161,29 +161,59 @@ describe('probe', () => {
     expect(await createHandlers(deps()).probe(' https://example.com/v ')).toEqual({ ok: true, value: media });
   });
 
-  it('explains what a link must look like', async () => {
+  it('explains what a link must look like (invalidLink)', async () => {
     expect(await createHandlers(deps()).probe('ftp://x')).toEqual({
       ok: false,
       error: 'Enter a link that starts with http:// or https://',
+      code: 'invalidLink',
     });
   });
 
-  it('passes on why a link cannot be downloaded', async () => {
+  it('passes on why a link cannot be downloaded: the reason token, coded linkProblem', async () => {
     probeImpl = async () => {
       throw new ProbeError('private');
     };
-    expect(await createHandlers(deps()).probe('https://x.y')).toEqual({ ok: false, error: 'private' });
+    expect(await createHandlers(deps()).probe('https://x.y')).toEqual({ ok: false, error: 'private', code: 'linkProblem' });
   });
 
-  it('never throws across the boundary', async () => {
+  it('linkProblem: the probe throws ProbeError("timed out reading the link")', async () => {
+    probeImpl = async () => {
+      throw new ProbeError('timed out reading the link');
+    };
+    const res = await createHandlers(deps()).probe('https://x.y');
+    expect(res).toEqual({ ok: false, error: 'timed out reading the link', code: 'linkProblem' });
+    expect(res).not.toHaveProperty('detail');
+  });
+
+  it('linkProblem: a reason with a number in it ("server answered 503") travels as the token', async () => {
+    probeImpl = async () => {
+      throw new ProbeError('server answered 503');
+    };
+    expect(await createHandlers(deps()).probe('https://x.y')).toEqual({ ok: false, error: 'server answered 503', code: 'linkProblem' });
+  });
+
+  it('never throws across the boundary: unexpected, with the message as its detail', async () => {
     probeImpl = async () => {
       throw new Error('boom');
     };
-    expect(await createHandlers(deps()).probe('https://x.y')).toEqual({ ok: false, error: 'Something went wrong: boom' });
+    expect(await createHandlers(deps()).probe('https://x.y')).toEqual({ ok: false, error: 'Something went wrong: boom', code: 'unexpected', detail: 'boom' });
   });
 
-  it('rejects a value that is not text', async () => {
-    expect(await createHandlers(deps()).probe(42 as unknown as string)).toMatchObject({ ok: false });
+  it('unexpected: a thrown value that is not an Error is written with String(), and is the detail', async () => {
+    probeImpl = async () => {
+      throw 'plain text';
+    };
+    expect(await createHandlers(deps()).probe('https://x.y')).toEqual({
+      ok: false,
+      error: 'Something went wrong: plain text',
+      code: 'unexpected',
+      detail: 'plain text',
+    });
+  });
+
+  it('rejects a value that is not text (invalidLink)', async () => {
+    expect(await createHandlers(deps()).probe(42 as unknown as string)).toEqual(INVALID_URL);
+    expect(probed).toEqual([]);
   });
 });
 
@@ -200,25 +230,25 @@ describe('add', () => {
     expect(added).toHaveLength(1);
   });
 
-  it('refuses a relative folder', async () => {
-    expect(await createHandlers(deps()).add(request({ dir: 'downloads' }))).toMatchObject({ ok: false });
+  it('refuses a relative folder (chooseFolder)', async () => {
+    expect(await createHandlers(deps()).add(request({ dir: 'downloads' }))).toEqual({ ok: false, error: 'Choose a download folder', code: 'chooseFolder' });
     expect(added).toEqual([]);
   });
 
   it('reports a folder that cannot be created', async () => {
     writeFileSync(join(dir, 'blocker'), 'a file, not a folder');
     const res = await createHandlers(deps()).add(request({ dir: join(dir, 'blocker', 'sub') }));
-    expect(res).toEqual({ ok: false, error: 'cannot write to folder' });
+    expect(res).toEqual({ ok: false, error: 'cannot write to folder', code: 'cannotWriteFolder' });
     expect(added).toEqual([]);
   });
 
   it('asks for at least one playlist item', async () => {
     const res = await createHandlers(deps()).add(request({ probe: list, selectedIndexes: [] }));
-    expect(res).toEqual({ ok: false, error: 'Select at least one item' });
+    expect(res).toEqual({ ok: false, error: 'Select at least one item', code: 'selectOne' });
   });
 
   it('refuses a selection that is not in the playlist', async () => {
-    expect(await createHandlers(deps()).add(request({ probe: list, selectedIndexes: [1, 7] }))).toMatchObject({ ok: false });
+    expect(await createHandlers(deps()).add(request({ probe: list, selectedIndexes: [1, 7] }))).toEqual(BAD);
     expect(added).toEqual([]);
   });
 
@@ -237,20 +267,32 @@ describe('add', () => {
     expect(added).toEqual([]);
   });
 
-  it('refuses malformed input instead of throwing', async () => {
-    expect(await createHandlers(deps()).add(null as unknown as AddRequest)).toMatchObject({ ok: false });
-    expect(await createHandlers(deps()).add({} as AddRequest)).toMatchObject({ ok: false });
+  it('refuses malformed input instead of throwing (badRequest): a non-object request, and one without a text url', async () => {
+    expect(await createHandlers(deps()).add(null as unknown as AddRequest)).toEqual(BAD);
+    expect(await createHandlers(deps()).add({} as AddRequest)).toEqual(BAD);
+    expect(await createHandlers(deps()).add('https://example.com/v' as unknown as AddRequest)).toEqual(BAD);
+    expect(await createHandlers(deps()).add({ ...request(), url: 5 } as unknown as AddRequest)).toEqual(BAD);
+    expect(added).toEqual([]);
   });
 
-  it('says so when the download tools are not installed yet', async () => {
+  it('says so when the download tools are not installed yet (toolsNotInstalled)', async () => {
     queueReady = false;
     engine = { state: 'notInstalled' };
-    expect(await createHandlers(deps()).add(request())).toEqual({ ok: false, error: 'Install the download tools first' });
+    expect(await createHandlers(deps()).add(request())).toEqual({ ok: false, error: 'Install the download tools first', code: 'toolsNotInstalled' });
   });
 });
 
+/**
+ * What a coded failure answers (Task D, item 2): the English text of today, its code and, for a detail code, its detail.
+ * The answer of a fixed code carries no detail.
+ */
+function failure(error: string, code: string, detail?: string): Record<string, unknown> {
+  return detail === undefined ? { ok: false, error, code } : { ok: false, error, code, detail };
+}
+
 /** What a refused request answers: the window cannot add what the stored list would reject (A4). */
-const BAD = { ok: false, error: 'That request is not valid' };
+const BAD = failure('That request is not valid', 'badRequest');
+const INVALID_URL = failure('Enter a link that starts with http:// or https://', 'invalidLink');
 const ACCEPTED = { ok: true, value: null };
 
 /** Stands for "the key is not there at all". */
@@ -539,6 +581,7 @@ describe('add refuses what the stored list would reject (A4)', () => {
 });
 
 const LANGUAGE_MESSAGE = 'Subtitle languages must be codes like en or ar';
+const LANGUAGE_ANSWER = failure(LANGUAGE_MESSAGE, 'subtitleLangs');
 
 /** An array of this length with only the given positions set: the others are holes, not undefined. */
 function holey<T>(length: number, set: Record<number, T> = {}): T[] {
@@ -563,7 +606,7 @@ interface WindowArray {
 }
 
 const WINDOW_ARRAYS: WindowArray[] = [
-  { name: 'subtitleLangs', make: (list) => request({ subtitleLangs: list as string[] }), valid: (i) => ['en', 'ar', 'de'][i] ?? 'fr', max: 10, answer: { ok: false, error: LANGUAGE_MESSAGE } },
+  { name: 'subtitleLangs', make: (list) => request({ subtitleLangs: list as string[] }), valid: (i) => ['en', 'ar', 'de'][i] ?? 'fr', max: 10, answer: LANGUAGE_ANSWER },
   { name: 'probe.heights', make: (list) => mediaRequest({ heights: list }), valid: () => 1080, max: 100, answer: BAD },
   {
     name: 'probe.entries',
@@ -631,7 +674,7 @@ describe('add checks every place of the arrays from the window (B2)', () => {
   ])('refuses new settings whose subtitleLangs is %s, whole and after a structured clone', async (_name, langs) => {
     const h = createHandlers(deps());
     for (const list of [langs, structuredClone(langs)]) {
-      expect(await h.setSettings(makeSettings({ downloadDir: dir, subtitleLangs: list }))).toEqual({ ok: false, error: LANGUAGE_MESSAGE });
+      expect(await h.setSettings(makeSettings({ downloadDir: dir, subtitleLangs: list }))).toEqual(LANGUAGE_ANSWER);
     }
     expect(savedSettings).toEqual([]);
     expect(queueSettings).toEqual([]);
@@ -782,8 +825,8 @@ describe('add refuses an array with a hole and leaves the real queue and its fil
     ['a playlist that is one hole', () => listRequest(new Array<unknown>(1)), BAD],
     ['a selection that is one hole', () => listRequest(threeEntries(), new Array<number>(1)), BAD],
     ['a selection of a valid position and then a hole', () => listRequest(threeEntries(), holey(2, { 0: 1 })), BAD],
-    ['a video whose subtitle languages are one hole', () => request({ subtitleLangs: new Array<string>(1) }), { ok: false, error: LANGUAGE_MESSAGE }],
-    ['a video with a valid language and then a hole', () => request({ subtitleLangs: holey(2, { 0: 'en' }) }), { ok: false, error: LANGUAGE_MESSAGE }],
+    ['a video whose subtitle languages are one hole', () => request({ subtitleLangs: new Array<string>(1) }), LANGUAGE_ANSWER],
+    ['a video with a valid language and then a hole', () => request({ subtitleLangs: holey(2, { 0: 'en' }) }), LANGUAGE_ANSWER],
     ['a video whose heights are one hole', () => mediaRequest({ heights: new Array<number>(1) }), BAD],
     ['a video with a valid height and then a hole', () => mediaRequest({ heights: holey(2, { 0: 1080 }) }), BAD],
   ];
@@ -834,8 +877,10 @@ describe('job and group actions', () => {
 
   it('refuses an unknown verb', async () => {
     const h = createHandlers(deps());
-    expect(await h.job('j1', 'explode' as JobVerb)).toMatchObject({ ok: false });
-    expect(await h.group('g1', 'remove' as GroupVerb)).toMatchObject({ ok: false });
+    expect(await h.job('j1', 'explode' as JobVerb)).toEqual(BAD);
+    expect(await h.group('g1', 'remove' as GroupVerb)).toEqual(BAD);
+    expect(await h.job(7 as unknown as string, 'pause')).toEqual(BAD);
+    expect(await h.group(7 as unknown as string, 'pause')).toEqual(BAD);
     expect(verbs).toEqual([]);
   });
 
@@ -853,15 +898,27 @@ describe('settings', () => {
     expect(queueSettings[0]?.maxConcurrent).toBe(8);
   });
 
-  it('refuses a relative download folder', async () => {
-    expect(await createHandlers(deps()).setSettings(makeSettings({ downloadDir: 'here' }))).toMatchObject({ ok: false });
+  it('refuses a relative download folder (chooseFolder)', async () => {
+    expect(await createHandlers(deps()).setSettings(makeSettings({ downloadDir: 'here' }))).toEqual(failure('Choose a download folder', 'chooseFolder'));
     expect(savedSettings).toEqual([]);
   });
 
-  it('refuses a broken default quality or subtitle list', async () => {
+  it('refuses a broken default quality (badRequest) or subtitle list (subtitleLangs)', async () => {
     const h = createHandlers(deps());
-    expect(await h.setSettings(makeSettings({ downloadDir: dir, defaultQuality: { kind: 'nope' } as never }))).toMatchObject({ ok: false });
-    expect(await h.setSettings(makeSettings({ downloadDir: dir, subtitleLangs: ['-x'] }))).toMatchObject({ ok: false });
+    expect(await h.setSettings(makeSettings({ downloadDir: dir, defaultQuality: { kind: 'nope' } as never }))).toEqual(BAD);
+    expect(await h.setSettings(makeSettings({ downloadDir: dir, subtitleLangs: ['-x'] }))).toEqual(LANGUAGE_ANSWER);
+  });
+
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['a number', 42],
+    ['text', 'settings'],
+    ['true', true],
+  ])('refuses settings that are not an object (%s) with badRequest, and saves nothing', async (_name, sent) => {
+    expect(await createHandlers(deps()).setSettings(sent as unknown as Settings)).toEqual(BAD);
+    expect(savedSettings).toEqual([]);
+    expect(queueSettings).toEqual([]);
   });
 
   it('saves settings even before the queue exists', async () => {
@@ -885,7 +942,8 @@ describe('settings', () => {
       },
     );
 
-    const BAD: [string, unknown][] = [
+    // Not named BAD: that name is the badRequest failure of the module (the answers below).
+    const BAD_VALUES: [string, unknown][] = [
       ['missing', undefined],
       ['null', null],
       ['a number', 1],
@@ -895,13 +953,13 @@ describe('settings', () => {
       ['an object', { value: 'ar' }],
       ['unknown', 'auto'],
     ];
-    const BAD_LANGUAGE: [string, unknown][] = [...BAD, ['wrong case', 'AR'], ['wrong case', 'System'], ['unknown', 'fr'], ['a theme value', 'dark']];
-    const BAD_THEME: [string, unknown][] = [...BAD, ['wrong case', 'Dark'], ['wrong case', 'System'], ['a language value', 'ar']];
+    const BAD_LANGUAGE: [string, unknown][] = [...BAD_VALUES, ['wrong case', 'AR'], ['wrong case', 'System'], ['unknown', 'fr'], ['a theme value', 'dark']];
+    const BAD_THEME: [string, unknown][] = [...BAD_VALUES, ['wrong case', 'Dark'], ['wrong case', 'System'], ['a language value', 'ar']];
 
     it.each(BAD_LANGUAGE)('refuses a language that is %s (%j) and saves nothing', async (_what, bad) => {
       const sent = { ...makeSettings({ downloadDir: dir, theme: 'dark' }), language: bad } as Record<string, unknown>;
       if (bad === undefined) delete sent['language'];
-      expect(await createHandlers(deps()).setSettings(sent as unknown as Settings)).toEqual({ ok: false, error: 'That request is not valid' });
+      expect(await createHandlers(deps()).setSettings(sent as unknown as Settings)).toEqual(BAD);
       expect(savedSettings).toEqual([]);
       expect(queueSettings).toEqual([]);
     });
@@ -909,14 +967,14 @@ describe('settings', () => {
     it.each(BAD_THEME)('refuses a theme that is %s (%j) and saves nothing', async (_what, bad) => {
       const sent = { ...makeSettings({ downloadDir: dir, language: 'ar' }), theme: bad } as Record<string, unknown>;
       if (bad === undefined) delete sent['theme'];
-      expect(await createHandlers(deps()).setSettings(sent as unknown as Settings)).toEqual({ ok: false, error: 'That request is not valid' });
+      expect(await createHandlers(deps()).setSettings(sent as unknown as Settings)).toEqual(BAD);
       expect(savedSettings).toEqual([]);
       expect(queueSettings).toEqual([]);
     });
 
     it('refuses before it looks at the other fields', async () => {
       const sent = { ...makeSettings({ downloadDir: 'relative' }), language: 'xx' } as unknown as Settings;
-      expect(await createHandlers(deps()).setSettings(sent)).toEqual({ ok: false, error: 'That request is not valid' });
+      expect(await createHandlers(deps()).setSettings(sent)).toEqual(BAD);
     });
   });
 });
@@ -956,7 +1014,7 @@ describe('opening files', () => {
 
     it('does not ask about a file that is gone', async () => {
       snapshot = { jobs: [makeJob({ id: 'j1', state: 'done', dir, fileName: 'setup.exe' })], groups: [] };
-      expect(await createHandlers(deps()).openFile('j1')).toEqual({ ok: false, error: 'The file is no longer there' });
+      expect(await createHandlers(deps()).openFile('j1')).toEqual({ ok: false, error: 'The file is no longer there', code: 'fileGone' });
       expect(askedToOpen).toEqual([]);
     });
 
@@ -966,7 +1024,7 @@ describe('opening files', () => {
       d.confirmOpenRunnable = async () => {
         throw new Error('no window');
       };
-      expect(await createHandlers(d).openFile('j1')).toEqual({ ok: false, error: 'Something went wrong: no window' });
+      expect(await createHandlers(d).openFile('j1')).toEqual({ ok: false, error: 'Something went wrong: no window', code: 'unexpected', detail: 'no window' });
       expect(opened).toEqual([]);
     });
 
@@ -978,17 +1036,19 @@ describe('opening files', () => {
     });
   });
 
-  it('says so when the file is gone', async () => {
+  it('says so when the file is gone (fileGone)', async () => {
     snapshot = { jobs: [doneJob()], groups: [] };
-    expect(await createHandlers(deps()).openFile('j1')).toEqual({ ok: false, error: 'The file is no longer there' });
+    expect(await createHandlers(deps()).openFile('j1')).toEqual({ ok: false, error: 'The file is no longer there', code: 'fileGone' });
     expect(opened).toEqual([]);
   });
 
-  it('does not open anything for an unfinished or unknown job', async () => {
+  it('does not open anything for an unfinished or unknown job (notFinished)', async () => {
     snapshot = { jobs: [makeJob({ id: 'j2', state: 'downloading', dir })], groups: [] };
     const h = createHandlers(deps());
-    expect(await h.openFile('j2')).toMatchObject({ ok: false });
-    expect(await h.openFile('nope')).toMatchObject({ ok: false });
+    expect(await h.openFile('j2')).toEqual({ ok: false, error: 'This download is not finished', code: 'notFinished' });
+    expect(await h.openFile('nope')).toEqual({ ok: false, error: 'This download is not finished', code: 'notFinished' });
+    snapshot = { jobs: [makeJob({ id: 'j3', state: 'done', dir, fileName: null })], groups: [] };
+    expect(await h.openFile('j3')).toEqual({ ok: false, error: 'This download is not finished', code: 'notFinished' });
     expect(opened).toEqual([]);
   });
 
@@ -1005,9 +1065,15 @@ describe('opening files', () => {
     expect(opened).toEqual([dir]);
   });
 
-  it('says so when the folder is gone', async () => {
+  it('says so when the folder is gone (folderGone)', async () => {
     snapshot = { jobs: [makeJob({ id: 'j2', state: 'paused', dir: join(dir, 'gone') })], groups: [] };
-    expect(await createHandlers(deps()).openFolder('j2')).toEqual({ ok: false, error: 'The folder is no longer there' });
+    expect(await createHandlers(deps()).openFolder('j2')).toEqual({ ok: false, error: 'The folder is no longer there', code: 'folderGone' });
+  });
+
+  it('openFolder of a job that does not exist is a bad request (badRequest)', async () => {
+    expect(await createHandlers(deps()).openFolder('nope')).toEqual(BAD);
+    expect(opened).toEqual([]);
+    expect(shown).toEqual([]);
   });
 });
 
@@ -1019,10 +1085,14 @@ describe('download tools', () => {
 
   it('reports a failed install and does not start the engines', async () => {
     installFails = true;
-    expect(await createHandlers(deps()).installBinaries()).toEqual({
+    const res = await createHandlers(deps()).installBinaries();
+    expect(res).toEqual({
       ok: false,
       error: 'could not download ffmpeg: server answered 404',
     });
+    // Install errors stay English: no code, no detail (typed install errors are a separate follow-up).
+    expect(res).not.toHaveProperty('code');
+    expect(res).not.toHaveProperty('detail');
     expect(installed).toBe(0);
   });
 
@@ -1037,17 +1107,26 @@ describe('download tools', () => {
 
 const INSTALL_TEXT = 'Install the download tools first';
 const STARTING_TEXT = 'The download tools are still starting';
-const INVALID_URL_TEXT = 'Enter a link that starts with http:// or https://';
-const START_FAILED: EngineStatus = { state: 'error', message: 'The download tools could not be started: spawn aria2c ENOENT' };
-const SERVICE_STOPPED: EngineStatus = { state: 'error', message: 'The file download service stopped' };
+const START_FAILED: EngineStatus = {
+  state: 'error',
+  message: 'The download tools could not be started: spawn aria2c ENOENT',
+  code: 'toolsStartFailed',
+  detail: 'spawn aria2c ENOENT',
+};
+const SERVICE_STOPPED: EngineStatus = { state: 'error', message: 'The file download service stopped', code: 'fileServiceStopped' };
 const READY: EngineStatus = { state: 'ready' };
+/** What a handler answers while the engine status has no queue behind it: the status text, its code and its detail. */
+const NOT_INSTALLED_ANSWER = failure(INSTALL_TEXT, 'toolsNotInstalled');
+const STARTING_ANSWER = failure(STARTING_TEXT, 'toolsStarting');
+const START_FAILED_ANSWER = failure('The download tools could not be started: spawn aria2c ENOENT', 'toolsStartFailed', 'spawn aria2c ENOENT');
+const SERVICE_STOPPED_ANSWER = failure('The file download service stopped', 'fileServiceStopped');
 
-/** Every engine status a window can meet, and the text a handler answers when the status has no queue behind it. */
-const NO_QUEUE: [string, EngineStatus, string][] = [
-  ['notInstalled', { state: 'notInstalled' }, INSTALL_TEXT],
-  ['starting', { state: 'starting' }, STARTING_TEXT],
-  ['error after a failed start', START_FAILED, 'The download tools could not be started: spawn aria2c ENOENT'],
-  ['error after an aria2 exit', SERVICE_STOPPED, 'The file download service stopped'],
+/** Every engine status a window can meet, and the failure a handler answers when the status has no queue behind it. */
+const NO_QUEUE: [string, EngineStatus, Record<string, unknown>][] = [
+  ['notInstalled', { state: 'notInstalled' }, NOT_INSTALLED_ANSWER],
+  ['starting', { state: 'starting' }, STARTING_ANSWER],
+  ['error after a failed start', START_FAILED, START_FAILED_ANSWER],
+  ['error after an aria2 exit', SERVICE_STOPPED, SERVICE_STOPPED_ANSWER],
 ];
 
 /** The four handlers that need a queue. */
@@ -1120,9 +1199,16 @@ describe('job and group results (9.3)', () => {
     expect(verbs).toEqual([['g1', verb]]);
   });
 
-  it('passes on the text of a queue that is closing', async () => {
-    verbResult = { ok: false, error: 'Fetchly is closing' };
-    expect(await createHandlers(deps()).job('j1', 'resume')).toEqual({ ok: false, error: 'Fetchly is closing' });
+  it('passes on the text and the code of a queue that is closing (closing)', async () => {
+    verbResult = { ok: false, error: 'Fetchly is closing', code: 'closing' };
+    expect(await createHandlers(deps()).job('j1', 'resume')).toEqual({ ok: false, error: 'Fetchly is closing', code: 'closing' });
+  });
+
+  it('passes on the code and the detail of a queue failure untouched', async () => {
+    verbResult = { ok: false, error: 'Could not delete the file: EBUSY', code: 'deleteFailed', detail: 'EBUSY' };
+    const h = createHandlers(deps());
+    expect(await h.job('j1', 'removeWithFile')).toEqual({ ok: false, error: 'Could not delete the file: EBUSY', code: 'deleteFailed', detail: 'EBUSY' });
+    expect(await h.group('g1', 'cancel')).toEqual({ ok: false, error: 'Could not delete the file: EBUSY', code: 'deleteFailed', detail: 'EBUSY' });
   });
 
   it.each(JOB_VERBS_ALL)('answers ok for a job verb %s that worked', async (verb) => {
@@ -1146,8 +1232,8 @@ describe('job and group results (9.3)', () => {
   it('still never throws across the boundary when the queue itself throws', async () => {
     const throwing = { ...deps(), queue: () => ({ add: () => undefined, job: async () => Promise.reject(new Error('boom')), group: async () => Promise.reject(new Error('boom')), confirmStraysGone: () => undefined, snapshot: () => snapshot, setSettings: () => undefined }) };
     const h = createHandlers(throwing);
-    expect(await h.job('j1', 'pause')).toEqual({ ok: false, error: 'Something went wrong: boom' });
-    expect(await h.group('g1', 'pause')).toEqual({ ok: false, error: 'Something went wrong: boom' });
+    expect(await h.job('j1', 'pause')).toEqual({ ok: false, error: 'Something went wrong: boom', code: 'unexpected', detail: 'boom' });
+    expect(await h.group('g1', 'pause')).toEqual({ ok: false, error: 'Something went wrong: boom', code: 'unexpected', detail: 'boom' });
   });
 });
 
@@ -1156,19 +1242,24 @@ describe('without a queue the handlers say why (9.3)', () => {
     queueReady = false;
     const h = createHandlers(deps());
     engine = START_FAILED;
-    expect(await h.add(request())).toEqual({ ok: false, error: 'The download tools could not be started: spawn aria2c ENOENT' });
+    expect(await h.add(request())).toEqual({
+      ok: false,
+      error: 'The download tools could not be started: spawn aria2c ENOENT',
+      code: 'toolsStartFailed',
+      detail: 'spawn aria2c ENOENT',
+    });
     engine = { state: 'starting' };
-    expect(await h.add(request())).toEqual({ ok: false, error: 'The download tools are still starting' });
+    expect(await h.add(request())).toEqual({ ok: false, error: 'The download tools are still starting', code: 'toolsStarting' });
     engine = { state: 'notInstalled' };
-    expect(await h.add(request())).toEqual({ ok: false, error: 'Install the download tools first' });
+    expect(await h.add(request())).toEqual({ ok: false, error: 'Install the download tools first', code: 'toolsNotInstalled' });
   });
 
   it.each(NEEDS_A_QUEUE.flatMap(([handler, run]) => NO_QUEUE.map(([state, status, text]) => [handler, state, run, status, text] as const)))(
     '%s answers the status text while the engine is %s',
-    async (_handler, _state, run, status, text) => {
+    async (_handler, _state, run, status, answer) => {
       queueReady = false;
       engine = status;
-      expect(await run(createHandlers(deps()))).toEqual({ ok: false, error: text });
+      expect(await run(createHandlers(deps()))).toEqual(answer);
       expect(added).toEqual([]);
       expect(verbs).toEqual([]);
       expect(confirmed).toBe(0);
@@ -1178,9 +1269,9 @@ describe('without a queue the handlers say why (9.3)', () => {
   it.each(NEEDS_A_QUEUE)('%s reads the status again on every call', async (_handler, run) => {
     queueReady = false;
     const h = createHandlers(deps());
-    for (const [, status, text] of [...NO_QUEUE, ...[...NO_QUEUE].reverse()]) {
+    for (const [, status, answer] of [...NO_QUEUE, ...[...NO_QUEUE].reverse()]) {
       engine = status;
-      expect(await run(h), text).toEqual({ ok: false, error: text });
+      expect(await run(h), String(answer['error'])).toEqual(answer);
     }
   });
 
@@ -1188,7 +1279,7 @@ describe('without a queue the handlers say why (9.3)', () => {
     queueReady = false;
     engine = { state: 'starting' };
     const target = join(dir, 'new', 'deep');
-    expect(await createHandlers(deps()).add(request({ dir: target }))).toEqual({ ok: false, error: STARTING_TEXT });
+    expect(await createHandlers(deps()).add(request({ dir: target }))).toEqual(STARTING_ANSWER);
     expect(existsSync(target)).toBe(false);
     expect(probed).toEqual([]);
   });
@@ -1276,12 +1367,16 @@ describe('status, retryEngines and confirmStraysGone (9.3)', () => {
   });
 
   describe('retryEngines calls the host and answers by the status afterwards', () => {
-    const AFTER: [string, EngineStatus, Result<null>][] = [
+    const AFTER: [string, EngineStatus, Record<string, unknown>][] = [
       ['ready', READY, { ok: true, value: null }],
-      ['error', { state: 'error', message: 'The download tools could not be started: port in use' }, { ok: false, error: 'The download tools could not be started: port in use' }],
-      ['error after an aria2 exit', SERVICE_STOPPED, { ok: false, error: 'The file download service stopped' }],
-      ['starting', { state: 'starting' }, { ok: false, error: STARTING_TEXT }],
-      ['notInstalled', { state: 'notInstalled' }, { ok: false, error: INSTALL_TEXT }],
+      [
+        'error',
+        { state: 'error', message: 'The download tools could not be started: port in use', code: 'toolsStartFailed', detail: 'port in use' },
+        failure('The download tools could not be started: port in use', 'toolsStartFailed', 'port in use'),
+      ],
+      ['error after an aria2 exit', SERVICE_STOPPED, failure('The file download service stopped', 'fileServiceStopped')],
+      ['starting', { state: 'starting' }, STARTING_ANSWER],
+      ['notInstalled', { state: 'notInstalled' }, NOT_INSTALLED_ANSWER],
     ];
 
     it.each(AFTER)('the status afterwards is %s', async (_name, after, expected) => {
@@ -1303,7 +1398,7 @@ describe('status, retryEngines and confirmStraysGone (9.3)', () => {
       retryImpl = async () => {
         engine = START_FAILED;
       };
-      expect(await createHandlers(deps()).retryEngines()).toEqual({ ok: false, error: 'The download tools could not be started: spawn aria2c ENOENT' });
+      expect(await createHandlers(deps()).retryEngines()).toEqual(START_FAILED_ANSWER);
     });
 
     it('waits for the host before it answers', async () => {
@@ -1356,10 +1451,10 @@ describe('status, retryEngines and confirmStraysGone (9.3)', () => {
       expect(confirmed).toBe(2);
     });
 
-    it.each(NO_QUEUE)('fails with the status text when there is no queue: %s', async (_name, status, text) => {
+    it.each(NO_QUEUE)('fails with the status text and code when there is no queue: %s', async (_name, status, answer) => {
       queueReady = false;
       engine = status;
-      expect(await createHandlers(deps()).confirmStraysGone()).toEqual({ ok: false, error: text });
+      expect(await createHandlers(deps()).confirmStraysGone()).toEqual(answer);
       expect(confirmed).toBe(0);
     });
   });
@@ -1372,6 +1467,8 @@ describe('status, retryEngines and confirmStraysGone (9.3)', () => {
       expect(await createHandlers(deps()).installBinaries()).toEqual({
         ok: false,
         error: 'The download tools could not be started: spawn aria2c ENOENT',
+        code: 'toolsStartFailed',
+        detail: 'spawn aria2c ENOENT',
       });
       expect(installed).toBe(1);
     });
@@ -1399,13 +1496,15 @@ describe('status, retryEngines and confirmStraysGone (9.3)', () => {
       afterInstallImpl = async () => {
         engine = SERVICE_STOPPED;
       };
-      expect(await createHandlers(deps()).installBinaries()).toEqual({ ok: false, error: 'The file download service stopped' });
+      expect(await createHandlers(deps()).installBinaries()).toEqual({ ok: false, error: 'The file download service stopped', code: 'fileServiceStopped' });
     });
 
     it('still reports a failed download as it did, and does not look at the engine', async () => {
       installFails = true;
       engine = START_FAILED;
-      expect(await createHandlers(deps()).installBinaries()).toEqual({ ok: false, error: 'could not download ffmpeg: server answered 404' });
+      const res = await createHandlers(deps()).installBinaries();
+      expect(res).toEqual({ ok: false, error: 'could not download ffmpeg: server answered 404' });
+      expect(res).not.toHaveProperty('code'); // an install error stays English and uncoded
       expect(installed).toBe(0);
     });
   });
@@ -1569,11 +1668,11 @@ describe('with the real handlers, Queue and Store (C1, C2, C3)', () => {
 
   describe('C3: a url with a control character never reaches the queue or a spawn', () => {
     const REFUSED_REAL: [string, () => AddRequest, unknown][] = [
-      ['a url with a NUL', () => request({ url: 'https://example.com/a\u0000b' }), { ok: false, error: INVALID_URL_TEXT }],
-      ['a url with U+001F', () => request({ url: 'https://example.com/a\u001fb' }), { ok: false, error: INVALID_URL_TEXT }],
-      ['a url with U+007F', () => request({ url: 'https://example.com/a\u007fb' }), { ok: false, error: INVALID_URL_TEXT }],
-      ['a url that ends in a NUL', () => request({ url: 'https://example.com/a\u0000' }), { ok: false, error: INVALID_URL_TEXT }],
-      ['a file request with a NUL in its url', () => ({ ...fileRequest(), url: 'https://example.com/a\u0000b.pdf' }), { ok: false, error: INVALID_URL_TEXT }],
+      ['a url with a NUL', () => request({ url: 'https://example.com/a\u0000b' }), INVALID_URL],
+      ['a url with U+001F', () => request({ url: 'https://example.com/a\u001fb' }), INVALID_URL],
+      ['a url with U+007F', () => request({ url: 'https://example.com/a\u007fb' }), INVALID_URL],
+      ['a url that ends in a NUL', () => request({ url: 'https://example.com/a\u0000' }), INVALID_URL],
+      ['a file request with a NUL in its url', () => ({ ...fileRequest(), url: 'https://example.com/a\u0000b.pdf' }), INVALID_URL],
       ['a playlist whose available entry has a NUL', () => listRequest([entryOf({ url: 'https://example.com/v/1\u0000' }), entryOf({ index: 2, url: 'https://example.com/v/2' })]), BAD],
       ['a playlist whose last available entry has U+001F', () => listRequest([entryOf(), entryOf({ index: 2, url: 'https://example.com/v/2\u001f' })]), BAD],
       ['a playlist whose available entry has U+007F', () => listRequest([entryOf({ url: 'https://example.com/\u007fv/1' }), entryOf({ index: 2, url: 'https://example.com/v/2' })]), BAD],
@@ -1720,7 +1819,7 @@ describe('C3: a url with a control character never reaches the queue or a spawn 
       const h = handlers();
       for (const code of CONTROL_CODES) {
         const res = await h.add(request({ url: `https://example.com/a${chr(code)}b`, dir: target() }));
-        expect(res, codeLabel(code)).toEqual({ ok: false, error: INVALID_URL_TEXT });
+        expect(res, codeLabel(code)).toEqual(INVALID_URL);
       }
       expect(added).toEqual([]);
       expect(existsSync(target())).toBe(false);
@@ -1731,7 +1830,7 @@ describe('C3: a url with a control character never reaches the queue or a spawn 
       const c = chr(code);
       const urls = [`https://${c}example.com/x`, `https://example.com/${c}x`, `https://example.com/x?q=${c}`, `https://example.com/x#${c}f`, `https://example.com/x${c}`, `${c}https://example.com/x`];
       for (const url of urls) {
-        expect(await h.add(request({ url, dir: target() })), `${codeLabel(code)} in ${JSON.stringify(url)}`).toEqual({ ok: false, error: INVALID_URL_TEXT });
+        expect(await h.add(request({ url, dir: target() })), `${codeLabel(code)} in ${JSON.stringify(url)}`).toEqual(INVALID_URL);
       }
       expect(added).toEqual([]);
       expect(existsSync(target())).toBe(false);
@@ -1741,7 +1840,7 @@ describe('C3: a url with a control character never reaches the queue or a spawn 
       const h = handlers();
       // tab, line feed, vertical tab, form feed and carriage return are whitespace: trim takes them. These are not.
       for (const code of [0x00, 0x01, 0x08, 0x0e, 0x1c, 0x1f, 0x7f]) {
-        expect(await h.add(request({ url: `https://example.com/x${chr(code)}`, dir: target() })), `${codeLabel(code)} at the end`).toEqual({ ok: false, error: INVALID_URL_TEXT });
+        expect(await h.add(request({ url: `https://example.com/x${chr(code)}`, dir: target() })), `${codeLabel(code)} at the end`).toEqual(INVALID_URL);
       }
       expect(added).toEqual([]);
       expect(existsSync(target())).toBe(false);
@@ -1752,7 +1851,7 @@ describe('C3: a url with a control character never reaches the queue or a spawn 
       const control = await h.add(request({ url: 'https://example.com/a\u0000b' }));
       const scheme = await h.add(request({ url: 'ftp://example.com/a' }));
       expect(control).toEqual(scheme);
-      expect(control).toEqual({ ok: false, error: INVALID_URL_TEXT });
+      expect(control).toEqual(INVALID_URL);
     });
 
     it.each([
@@ -1787,19 +1886,19 @@ describe('C3: a url with a control character never reaches the queue or a spawn 
       const h = handlers();
       for (const code of CONTROL_CODES) {
         const res = await h.probe(`https://example.com/a${chr(code)}b`);
-        expect(res, codeLabel(code)).toEqual({ ok: false, error: INVALID_URL_TEXT });
+        expect(res, codeLabel(code)).toEqual(INVALID_URL);
       }
       expect(probed).toEqual([]);
     });
 
     it('probe with a NUL answers the InvalidUrl text, and deps.probe is not called', async () => {
-      expect(await handlers().probe('https://example.com/a\u0000b')).toEqual({ ok: false, error: INVALID_URL_TEXT });
-      expect(await handlers().probe('https://example.com/a\u0000')).toEqual({ ok: false, error: INVALID_URL_TEXT });
+      expect(await handlers().probe('https://example.com/a\u0000b')).toEqual(INVALID_URL);
+      expect(await handlers().probe('https://example.com/a\u0000')).toEqual(INVALID_URL);
       expect(probed).toEqual([]);
     });
 
     it.each([0x1c, 0x1f, 0x7f])('probe refuses %i at the end of the url, where trimming does not remove it', async (code) => {
-      expect(await handlers().probe(`https://example.com/x${chr(code)}`)).toEqual({ ok: false, error: INVALID_URL_TEXT });
+      expect(await handlers().probe(`https://example.com/x${chr(code)}`)).toEqual(INVALID_URL);
       expect(probed).toEqual([]);
     });
 

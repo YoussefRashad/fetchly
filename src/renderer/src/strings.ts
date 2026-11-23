@@ -1,3 +1,4 @@
+import { ERROR_TEXT, SAVE_FAILED_PREFIX } from '../../shared/errors';
 import type { Lang } from '../../shared/i18n';
 import type { BinName, EntryReason, GroupVerb, JobVerb } from '../../shared/types';
 import type { Filter } from './format';
@@ -63,7 +64,7 @@ export const EN = {
     waitingForCheck: 'waiting for a check',
     retrying: (attempt: number, max: number) => `retrying (${attempt}/${max})`,
   },
-  /** Every reason the main process gives a failed or skipped job, by its English text. */
+  /** Every reason the main process gives a failed or skipped job, and every fixed reason of the link probe, by its English text. */
   reasons: {
     protected: 'protected',
     'login required': 'login required',
@@ -86,6 +87,20 @@ export const EN = {
     'download was removed': 'download was removed',
     'the download service stopped': 'the download service stopped',
     'the download service is not running': 'the download service is not running',
+    'could not reach the server': 'could not reach the server',
+    'this link is a web page, not a file': 'this link is a web page, not a file',
+    'yt-dlp stopped before it could read the link. Try again.': 'yt-dlp stopped before it could read the link. Try again.',
+  },
+  /**
+   * The text of every error code that is not a reason (src/shared/errors.ts; English: the very values of ERROR_TEXT),
+   * and three texts that are not codes: `other` (a text with no translation, shown as it came), `saveFailed` (the
+   * save error of the download list) and `serverAnswered` (a link-probe reason; `n` is the digits as they came).
+   */
+  errors: {
+    ...ERROR_TEXT,
+    other: (text: string) => text,
+    saveFailed: (detail: string) => `${SAVE_FAILED_PREFIX}${detail}`,
+    serverAnswered: (n: string) => `server answered ${n}`,
   },
   size: {
     mediaHint: 'Size of the part downloading now; video and audio download separately.',
