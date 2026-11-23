@@ -36,12 +36,17 @@ export function percent(job: Job): number | null {
 
 const RETRYING = /^retrying \((\d+)\/(\d+)\)$/u;
 
-/** A reason from the main process in the language in use; one without a translation is kept as it came. */
-export function reasonText(reason: string): string {
+/** A reason from the main process in the language in use: its table entry, else a retry count in words, else null. */
+export function knownReason(reason: string): string | null {
   if (Object.hasOwn(S.reasons, reason)) return S.reasons[reason as keyof Strings['reasons']];
   const retry = RETRYING.exec(reason);
   if (retry) return S.status.retrying(Number(retry[1]), Number(retry[2]));
-  return reason;
+  return null;
+}
+
+/** A reason from the main process in the language in use; one without a translation is kept as it came. */
+export function reasonText(reason: string): string {
+  return knownReason(reason) ?? reason;
 }
 
 /** The speed column: only while the job downloads, and only once a speed is known. */

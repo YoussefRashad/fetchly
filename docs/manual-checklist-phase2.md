@@ -38,3 +38,16 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:<port>/v1/pair -ContentType
 | 17 | With a browser paired, Settings open and no code shown, make `pairing.json` read-only, then send `POST /v1/unpair` (Origin, `Authorization: Bearer <token>`, body `{}`) from PowerShell. | Within about 2 s the entry leaves the list and "Pairing changes are not saved to disk yet" appears, without touching the panel. |
 | 18 | Press **Pair a browser**, then set the Windows clock back one hour, then forward two. | The countdown keeps falling one per second, never shows more than 5:00, and the code stays shown and usable until its real five minutes end. |
 | 19 | Make `settings.json` read-only and save a new port (it fails). Type the old port back into the port field without saving, press **Pair a browser** and send the pairing request. Clear Read-only, type the new port again and save. | The dialog asks again; afterwards the list is empty and Fetchly listens on the new port. |
+
+## D: housekeeping
+
+Errors now carry a code, so the Arabic window shows them in Arabic. Rows 1, 2 and 4
+need the window in Arabic (Settings → Language → العربية, then Save).
+
+| # | Do | Expected |
+| --- | --- | --- |
+| 1 | Paste `ftp://x` into the link bar and press **إضافة**. | The error under the bar is Arabic: "أدخل رابطًا يبدأ بـ http:// أو https://", each link reading left to right. |
+| 2 | In Settings, set the port to `80` and press **حفظ**. | The dialog's error line is Arabic: "المنفذ يجب أن يكون عددًا صحيحًا من 1024 إلى 65535". Nothing is saved. |
+| 3 | On a PC where the download tools are not installed yet, put `"language": "ar"` in `%APPDATA%\fetchly\settings.json`, start Fetchly, disconnect the network and press **تثبيت**. | The install error stays English (for example "could not download …") and reads left to right inside the Arabic screen. |
+| 4 | Run `netsh interface ipv4 show excludedportrange protocol=tcp`. Pick a listed range that is **not** marked `*` and holds a port of 1024 or more, and save one of its ports in Settings. Ranges marked `*` are administered exclusions; in the Windows run on 2026-11-23, port 50000 in such a range (50000-50059) allowed a loopback bind, while 50100 in an unmarked range returned EACCES. | The banner is Arabic: "لا يمكن استخدام المنفذ … على هذا الكمبيوتر؛ اختر منفذًا آخر من الإعدادات", with the port in Western digits. If no unmarked range holds such a port, mark this row spec-only (`tests/server/port.test.ts`, `tests/renderer/bannersServer.test.ts`). |
+| 5 | (spec-only) | The notice "Settings were saved, but the running downloads did not take them" (`tests/ipcPairing.test.ts`, `tests/renderer/errors.test.ts`) and the Best-quality download that falls back when the height check passes 64 MB (`tests/engines/media.test.ts`) cannot be forced by hand. |

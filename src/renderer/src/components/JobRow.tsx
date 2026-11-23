@@ -1,5 +1,5 @@
 import { Fragment } from 'react';
-import type { Job, JobVerb } from '../../../shared/types';
+import type { ErrorInfo, Job, JobVerb } from '../../../shared/types';
 import { addedText, addedTitle, allowedVerbs, etaText, percent, qualityLabel, sizeParts, speedText, statusParts, statusText } from '../format';
 import { S } from '../strings';
 
@@ -14,7 +14,8 @@ const ICONS: Record<JobVerb, string> = {
 
 interface Props {
   job: Job;
-  onError(message: string): void;
+  /** A failed action: App keeps it as a value and translates it at render. */
+  onError(info: ErrorInfo): void;
 }
 
 /** The size column: the done figure stands out; the slash, size and unit stay quiet. One left-to-right run. */
@@ -42,12 +43,12 @@ export function JobRow({ job, onError }: Props) {
     if (verb === 'cancel' && !window.confirm(S.confirmCancel(job.title))) return;
     if (verb === 'removeWithFile' && !window.confirm(S.confirmDeleteFile(job.title))) return;
     const res = await window.fetchly.job(job.id, verb);
-    if (!res.ok) onError(res.error);
+    if (!res.ok) onError(res);
   }
 
   async function open(kind: 'file' | 'folder') {
     const res = kind === 'file' ? await window.fetchly.openFile(job.id) : await window.fetchly.openFolder(job.id);
-    if (!res.ok) onError(res.error);
+    if (!res.ok) onError(res);
   }
 
   return (

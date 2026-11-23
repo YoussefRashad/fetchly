@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { ProbeResult } from '../../../shared/types';
+import { errorText } from '../errors';
 import { S } from '../strings';
 
 interface Props {
@@ -20,7 +21,7 @@ export function UrlBar({ onProbed, onOpenSettings }: Props) {
     setError(null);
     const res = await window.fetchly.probe(value);
     setBusy(false);
-    if (!res.ok) return setError(res.error);
+    if (!res.ok) return setError(errorText(res));
     setUrl('');
     onProbed(value, res.value);
   }

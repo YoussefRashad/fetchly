@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { ProbeResult, Settings } from '../../../shared/types';
+import { errorText } from '../errors';
 import { formatBytes } from '../format';
 import { S } from '../strings';
 import { decodeQuality, encodeQuality, parseLangs, qualityOptions } from './quality';
@@ -53,7 +54,7 @@ export function AddDialog({ url, probe, settings, onClose }: Props) {
     });
     setBusy(false);
     if (res.ok) onClose();
-    else setError(res.error);
+    else setError(errorText(res));
   }
 
   return (
