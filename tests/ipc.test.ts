@@ -11,8 +11,11 @@ import { InvalidUrl, ProbeError, validateUrl as realValidateUrl } from '../src/m
 import { parseProbe } from '../src/main/ytdlp/parse';
 import type { AddRequest, EngineStatus, GroupVerb, Job, JobVerb, ProbeResult, Quality, Result, Settings, Snapshot } from '../src/shared/types';
 import { makeJob, makeSettings } from './helpers';
+import { makeIpcServerFixture, type IpcFixture } from './server/fakes';
 
 let dir: string;
+/** A1 fixture: the pairing store, the server and the port-change dialog that HandlerDeps now needs. */
+let ipcServer: IpcFixture;
 let added: AddRequest[];
 let verbs: [string, JobVerb | GroupVerb][];
 let snapshot: Snapshot;
@@ -40,6 +43,9 @@ let retries: number;
 let retryImpl: () => Promise<void>;
 /** What the fake afterInstall does besides counting. */
 let afterInstallImpl: () => Promise<void>;
+
+/** What the A1 fixture's fake server reports (status.server in the status answers). */
+const LISTENING = { state: 'listening', port: 38917 } as const;
 
 const media: ProbeResult = { kind: 'media', title: 'Talk', thumbnail: null, heights: [1080] };
 const list: ProbeResult = {
@@ -70,7 +76,8 @@ function deps(): HandlerDeps {
             setSettings: (s) => queueSettings.push(s),
           }
         : null,
-    status: () => ({ engine, saveError }),
+    status: () => ({ engine, saveError, server: ipcServer.state.current }),
+    ...ipcServer.deps,
     retryEngines: async () => {
       retries += 1;
       await retryImpl();
@@ -124,6 +131,7 @@ const request = (over: Partial<AddRequest> = {}): AddRequest => ({
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'fetchly-ipc-'));
+  ipcServer = makeIpcServerFixture();
   added = [];
   verbs = [];
   snapshot = { jobs: [], groups: [] };
@@ -1184,7 +1192,7 @@ describe('status, retryEngines and confirmStraysGone (9.3)', () => {
     async (_engine, _label, status, error) => {
       engine = status;
       saveError = error;
-      expect(await createHandlers(deps()).status()).toStrictEqual({ engine: status, saveError: error });
+      expect(await createHandlers(deps()).status()).toStrictEqual({ engine: status, saveError: error, server: LISTENING });
     },
   );
 
@@ -1193,20 +1201,28 @@ describe('status, retryEngines and confirmStraysGone (9.3)', () => {
     saveError = 'could not save the download list: disk full';
     for (const ready of [true, false]) {
       queueReady = ready;
-      expect(await createHandlers(deps()).status()).toStrictEqual({ engine: START_FAILED, saveError: 'could not save the download list: disk full' });
+      expect(await createHandlers(deps()).status()).toStrictEqual({
+        engine: START_FAILED,
+        saveError: 'could not save the download list: disk full',
+        server: LISTENING,
+      });
     }
   });
 
   it('status follows the engine and the save error as they change', async () => {
     const h = createHandlers(deps());
-    expect(await h.status()).toStrictEqual({ engine: READY, saveError: null });
+    expect(await h.status()).toStrictEqual({ engine: READY, saveError: null, server: LISTENING });
     engine = SERVICE_STOPPED;
-    expect(await h.status()).toStrictEqual({ engine: SERVICE_STOPPED, saveError: null });
+    expect(await h.status()).toStrictEqual({ engine: SERVICE_STOPPED, saveError: null, server: LISTENING });
     saveError = 'could not save the download list: disk full';
-    expect(await h.status()).toStrictEqual({ engine: SERVICE_STOPPED, saveError: 'could not save the download list: disk full' });
+    expect(await h.status()).toStrictEqual({
+      engine: SERVICE_STOPPED,
+      saveError: 'could not save the download list: disk full',
+      server: LISTENING,
+    });
     engine = READY;
     saveError = null;
-    expect(await h.status()).toStrictEqual({ engine: READY, saveError: null });
+    expect(await h.status()).toStrictEqual({ engine: READY, saveError: null, server: LISTENING });
   });
 
   describe('retryEngines calls the host and answers by the status afterwards', () => {

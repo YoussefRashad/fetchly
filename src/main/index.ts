@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { app, BrowserWindow, dialog, ipcMain, shell, type Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, powerMonitor, shell, type MessageBoxOptions, type Tray } from 'electron';
 import type { AppStatus, Settings } from '../shared/types';
 import { Binaries } from './binaries';
 import { EngineHost } from './engineHost';
@@ -11,6 +11,9 @@ import type { Queue } from './jobs/queue';
 import { Store } from './jobs/store';
 import { probeUrl, validateUrl } from './probe';
 import { createQueueLifecycle } from './queueLifecycle';
+import { createPairingStore, loadPairingFile, savePairingFile } from './server/pairing';
+import { a1Routes, register } from './server/routes';
+import { productionDeps, start as startServer, type RunningServer } from './server/server';
 import { attachQueue, createTray } from './shell';
 import { killStrays } from './strays';
 import { ToolGate } from './toolGate';
@@ -20,6 +23,10 @@ let tray: Tray | null = null;
 /** Starts the tools and owns the queue; null until main() ran. */
 let host: EngineHost<Queue> | null = null;
 let quitting = false;
+/** Stops the browser server (its synchronous part closes the listener); null until it started. */
+let stopServer: (() => Promise<void>) | null = null;
+/** Writes the pairing list if a write is still pending; never throws. null until main() loaded it. */
+let flushPairings: (() => void) | null = null;
 
 function createWindow(): BrowserWindow {
   const w = new BrowserWindow({
@@ -75,6 +82,26 @@ async function main(): Promise<void> {
     ? `The saved download list could not be read and was set aside as ${loaded.recoveredCorrupt}. The list starts empty.`
     : null;
 
+  // The browser pairings, for the effective port only (S12); an unreadable file is set aside with a notice.
+  const loadedPairings = loadPairingFile(userData, settings.serverPort);
+  if (loadedPairings.notice !== null) notice = notice === null ? loadedPairings.notice : `${notice} ${loadedPairings.notice}`;
+  const serverDeps = productionDeps();
+  /** The started server; null until start() resolved, so the store sees no `listening` before that. */
+  let runningServer: RunningServer | null = null;
+  const pairing = createPairingStore(
+    {
+      now: serverDeps.now,
+      randomBytes: serverDeps.randomBytes,
+      safeEqual: serverDeps.safeEqual,
+      setTimer: serverDeps.setTimer,
+      clearTimer: serverDeps.clearTimer,
+      save: (file) => savePairingFile(userData, file),
+      serverStatus: () => runningServer?.status() ?? { state: 'error', message: 'The browser connection is starting' },
+    },
+    loadedPairings.pairings,
+  );
+  flushPairings = () => pairing.flush();
+
   const binDir = join(userData, 'bin');
   const binaries = new Binaries(binDir);
   // The start-up cleanup ends every tool started from binDir; the window's own tool runs
@@ -84,7 +111,7 @@ async function main(): Promise<void> {
   /** The last value from queue.onSaveState: the text of the last failed write of jobs.json, or null. */
   let saveError: string | null = null;
 
-  const appStatus = (): AppStatus => ({ engine: engines.status(), saveError });
+  const appStatus = (): AppStatus => ({ engine: engines.status(), saveError, server: server.status() });
   const pushStatus = (): void => send('fetchly:status', appStatus());
 
   // Construct, wire and dispose the queue (F2). After a queue whose wiring failed, the next one
@@ -121,6 +148,29 @@ async function main(): Promise<void> {
     onStatus: pushStatus,
   });
   host = engines;
+
+  // The browser server: the A1 routes, then the one awaited start (A5 sweeps tmp/ before this line).
+  // Its status is decided (listening, portBusy or error) before any handler or window exists.
+  for (const route of a1Routes({ pairing, appVersion: app.getVersion(), engine: () => engines.status().state })) register(route);
+  const server = await startServer(settings.serverPort, {
+    ...serverDeps,
+    // A server that fails after it started (or does not start) changes the status: the window is told,
+    // after the server's own 'error' listener has recorded the new state.
+    createServer: (options, listener) => {
+      const created = serverDeps.createServer(options, listener);
+      created.on('error', () =>
+        setImmediate(() => {
+          if (runningServer) pushStatus();
+        }),
+      );
+      return created;
+    },
+    pairing,
+  });
+  runningServer = server;
+  stopServer = () => server.stop();
+  // A sleep cancels an open pairing code, whatever the monotonic clock does across it (S23).
+  powerMonitor.on('suspend', () => pairing.cancel());
 
   const handlers: Handlers = createHandlers({
     queue: () => engines.queue(),
@@ -169,6 +219,29 @@ async function main(): Promise<void> {
       notice = null;
       return once;
     },
+    pairing,
+    server: {
+      status: () => server.status(),
+      ensure: async (port) => {
+        const next = await server.ensure(port);
+        pushStatus();
+        return next;
+      },
+    },
+    confirmPortChange: async (count) => {
+      const options: MessageBoxOptions = {
+        type: 'warning',
+        title: 'Change the port?',
+        message: count === 1 ? 'Changing the port removes the paired browser.' : `Changing the port removes all ${count} paired browsers.`,
+        detail: 'Each browser has to be paired again on the new port.',
+        buttons: ['Change port', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      };
+      const answer = win && !win.isDestroyed() ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options);
+      return answer.response === 0;
+    },
   });
 
   for (const [name, handler] of Object.entries(handlers)) {
@@ -194,9 +267,14 @@ if (!app.requestSingleInstanceLock()) {
     if (quitting) return;
     quitting = true;
     event.preventDefault();
+    // R2-7: the browser server stops first (its listener closes before stop() returns its promise), so no
+    // pairing change can land after the last write; then a pending pairing write is flushed.
+    const serverStopped = stopServer?.() ?? Promise.resolve();
+    flushPairings?.();
     const cap = new Promise<void>((r) => setTimeout(r, 5000));
     const tidy = (async () => {
       try {
+        await serverStopped;
         await host?.queue()?.shutdown();
       } finally {
         await host?.daemon()?.stop();

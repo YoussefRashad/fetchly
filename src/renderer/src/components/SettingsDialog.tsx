@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import type { BinStatus, Settings } from '../../../shared/types';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { BinStatus, PairingsView, ServerStatus, Settings } from '../../../shared/types';
 import { S } from '../strings';
 import { decodeQuality, encodeQuality, parseLangs, qualityOptions } from './quality';
 
@@ -7,6 +7,146 @@ interface Props {
   settings: Settings;
   onSaved(s: Settings): void;
   onClose(): void;
+}
+
+const EMPTY_VIEW: PairingsView = { pairings: [], codeOpen: false, unsaved: false };
+
+/**
+ * The "Browser" panel: the server state, pairing with a code, the paired browsers and Unpair.
+ * Pairing is offered only while the server listens on the port in the form (a changed port is saved first).
+ */
+function BrowserPanel({ draftPort }: { draftPort: number }) {
+  const [server, setServer] = useState<ServerStatus | null>(null);
+  const [view, setView] = useState<PairingsView>(EMPTY_VIEW);
+  const [code, setCode] = useState<{ text: string; until: number } | null>(null);
+  // Monotonic (performance.now()), so a change of the Windows clock does not move the countdown.
+  const [now, setNow] = useState(() => performance.now());
+  const [error, setError] = useState<string | null>(null);
+  // False once the panel is unmounted: a pairings() answer that arrives later is ignored.
+  const alive = useRef(true);
+
+  const refresh = useCallback(() => {
+    void window.fetchly.pairings().then((v) => {
+      if (alive.current) setView(v);
+    });
+  }, []);
+
+  useEffect(() => {
+    alive.current = true;
+    const stop = window.fetchly.onStatus((s) => setServer(s.server));
+    void window.fetchly.status().then((s) => setServer(s.server));
+    refresh();
+    // Polled every second for as long as the panel is shown: nothing pushes pairing changes (a pairing or an
+    // unpair over HTTP, a failed write), so this is how the list and the unsaved line stay current.
+    const timer = setInterval(refresh, 1000);
+    return () => {
+      alive.current = false;
+      clearInterval(timer);
+      stop();
+    };
+  }, [refresh]);
+
+  // The countdown of the shown code.
+  useEffect(() => {
+    if (!code) return undefined;
+    const timer = setInterval(() => setNow(performance.now()), 1000);
+    return () => clearInterval(timer);
+  }, [code]);
+
+  // The code was used, cancelled or ended in the main process: the string is dead.
+  useEffect(() => {
+    if (!view.codeOpen) setCode(null);
+  }, [view.codeOpen]);
+
+  async function start() {
+    setError(null);
+    const res = await window.fetchly.pairingStart();
+    if (!res.ok) {
+      setError(res.error);
+    } else {
+      const at = performance.now();
+      setNow(at);
+      setCode({ text: res.value.pairingString, until: at + res.value.lifetimeMs });
+    }
+    refresh();
+  }
+
+  async function cancel() {
+    setCode(null);
+    await window.fetchly.pairingCancel();
+    refresh();
+  }
+
+  async function unpair(id: string) {
+    setError(null);
+    const res = await window.fetchly.unpair(id);
+    if (!res.ok) setError(res.error);
+    refresh();
+  }
+
+  const listening = server?.state === 'listening';
+  const canPair = server?.state === 'listening' && server.port === draftPort;
+  const left = code ? Math.max(0, Math.ceil((code.until - now) / 1000)) : 0;
+
+  let line: string;
+  if (server === null) line = S.serverChecking;
+  else if (server.state === 'listening') line = S.serverListening(server.port);
+  else if (server.state === 'portBusy') line = S.serverPortBusy(server.port);
+  else line = server.message;
+
+  return (
+    <>
+      <h3>{S.browserTitle}</h3>
+      <p className="note">{line}</p>
+      {code ? (
+        <div className="row">
+          {left > 0 ? (
+            <>
+              <span>{S.pairEnter}</span>
+              <strong style={{ fontFamily: 'monospace', fontSize: '1.25em', userSelect: 'all' }}>{code.text}</strong>
+              <small>{S.pairExpiresIn(left)}</small>
+            </>
+          ) : (
+            <span>{S.pairExpired}</span>
+          )}
+          <button type="button" onClick={() => void cancel()}>
+            {S.pairCancel}
+          </button>
+        </div>
+      ) : (
+        <>
+          <button type="button" disabled={!canPair} onClick={() => void start()}>
+            {S.pairBrowser}
+          </button>
+          {listening && !canPair && <small>{S.pairSaveFirst}</small>}
+        </>
+      )}
+      {view.pairings.length === 0 ? (
+        <p className="muted">{S.noPairings}</p>
+      ) : (
+        <ul className="tools">
+          {view.pairings.map((p) => (
+            <li key={p.id}>
+              <strong>{p.label}</strong> <span>{S.pairedAt(new Date(p.pairedAt).toLocaleString())}</span>{' '}
+              <button type="button" onClick={() => void unpair(p.id)}>
+                {S.unpair}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {view.unsaved && (
+        <p className="error" role="status">
+          {S.pairingsUnsaved}
+        </p>
+      )}
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+    </>
+  );
 }
 
 export function SettingsDialog({ settings, onSaved, onClose }: Props) {
@@ -109,6 +249,20 @@ export function SettingsDialog({ settings, onSaved, onClose }: Props) {
           <input type="checkbox" checked={draft.autoResumeOnStart} onChange={(e) => set('autoResumeOnStart', e.target.checked)} />
           {S.autoResume}
         </label>
+
+        <label>
+          {S.serverPort}
+          <input
+            type="number"
+            min={1024}
+            max={65535}
+            value={Number.isFinite(draft.serverPort) ? draft.serverPort : ''}
+            onChange={(e) => set('serverPort', e.target.valueAsNumber)}
+          />
+          <small>{S.serverPortHint}</small>
+        </label>
+
+        <BrowserPanel draftPort={draft.serverPort} />
 
         <h3>{S.tools}</h3>
         <ul className="tools">

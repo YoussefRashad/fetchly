@@ -146,6 +146,7 @@ Windows SmartScreen may warn the first time, because the app is not signed.
 | --- | --- |
 | Downloads | `Downloads\Fetchly` (change it in Settings) |
 | Download list and settings | `%APPDATA%\fetchly\jobs.json`, `settings.json` |
+| Paired browsers | `%APPDATA%\fetchly\pairing.json` |
 | The three tools | `%APPDATA%\fetchly\bin` |
 
 `%APPDATA%\fetchly\bin` belongs to the app alone. At start Fetchly ends every
@@ -154,6 +155,30 @@ copies by hand.
 
 Closing the window keeps downloads running; the app lives in the tray, and
 **Quit** is in the tray menu.
+
+## Browser connection
+
+For the browser extension (in progress), the app listens on `127.0.0.1` only,
+on port 38917 by default. **Settings → Browser connection port** changes it to
+any port from 1024 to 65535. A browser is paired once: **Settings → Browser →
+Pair a browser** shows a one-time `<port>-<code>` string, valid for 5 minutes,
+that is typed into the extension. Up to four browsers can be paired, each with
+its own token; **Unpair** revokes one at once.
+
+- **Changing the port means pairing again.** The port is part of every
+  pairing, so saving a new port removes all pairings after a confirmation.
+- If the port is taken by another program, a banner says so and pairing is
+  off; choose another port, or free it and save Settings again.
+- `pairing.json` holds values derived from each browser's token (never the
+  token itself). It sits in the roaming profile, which sync and backups copy.
+  A `pairing.json.corrupt-*` file (an unreadable list set aside at start) and a
+  leftover `pairing.json.tmp` hold the same key material: delete them by hand
+  when you no longer need them.
+- **Same-user limit:** any program running as your Windows user can read
+  `pairing.json` and the extension's storage. That is not defended.
+- If a pairing change cannot be written to disk, Fetchly keeps it in memory,
+  says so in Settings, and retries every 30 s and at quit. Until a write
+  succeeds, a restart shows the old list, so an unpaired browser can return.
 
 ## Develop
 
@@ -182,6 +207,8 @@ It was written under the working name Hammel; the dated plans in
 
 ```
 src/shared/types.ts      types used by both sides
+src/shared/protocol.ts   the browser wire protocol: limits, formats, error tokens
+src/main/server/         local server for the browser: listener, routes, pairing
 src/main/jobs/           state machine, persistence, validation, queue
 src/main/engines/        yt-dlp and aria2 supervision
 src/main/ytdlp/          argument building and output parsing

@@ -7,7 +7,7 @@ const CUT_OFF_TEXT =
   'Some downloads were cut off and Fetchly could not check that their old processes are gone. End yt-dlp, ffmpeg and aria2c in Task Manager, then confirm.';
 
 function status(engine: EngineStatus, saveError: string | null = null): AppStatus {
-  return { engine, saveError };
+  return { engine, saveError, server: { state: 'listening', port: 38917 } };
 }
 
 function snap(jobs: Job[] = []): Snapshot {
