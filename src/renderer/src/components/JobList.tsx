@@ -1,4 +1,4 @@
-import type { Snapshot } from '../../../shared/types';
+import type { ErrorInfo, Snapshot } from '../../../shared/types';
 import { matchesFilter, type Filter } from '../format';
 import { S } from '../strings';
 import { GroupRow } from './GroupRow';
@@ -7,7 +7,7 @@ import { JobRow } from './JobRow';
 interface Props {
   snapshot: Snapshot;
   filter: Filter;
-  onError(message: string): void;
+  onError(info: ErrorInfo): void;
 }
 
 export function JobList({ snapshot, filter, onError }: Props) {
