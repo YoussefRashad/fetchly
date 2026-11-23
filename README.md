@@ -144,6 +144,23 @@ npm start
 
 Windows SmartScreen may warn the first time, because the app is not signed.
 
+## Build a portable exe
+
+```powershell
+npm run dist:portable
+```
+
+This builds the app and packs it with electron-builder into one file,
+`dist\Fetchly-<version>-portable-x64.exe`, that runs without installing.
+Copy it anywhere and double-click it. Each start unpacks the app to a
+temporary folder first, so it opens a few seconds slower than an installed
+app. The exe is not signed, so SmartScreen may warn.
+
+The portable exe keeps its data where the other builds do, in
+`%APPDATA%\fetchly` (see the table below), not next to the exe. Moving or
+deleting the exe leaves the download list, settings, pairings and the three
+tools in place; delete that folder to remove them.
+
 ## Where things live
 
 | What | Where |

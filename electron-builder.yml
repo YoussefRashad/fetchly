@@ -1,0 +1,26 @@
+# Packager config for `npm run dist:portable`: one portable x64 .exe for Windows.
+# No installer, no publishing, no code signing, no auto-update.
+appId: io.github.youssefrashad.fetchly
+productName: Fetchly
+directories:
+  output: dist
+# Only the built app goes in. Tests, e2e/, docs, .superpowers/ and src/ stay out.
+files:
+  - package.json
+  - out/**/*
+  - '!out/**/*.map'
+  # React is bundled into out/renderer by Vite; the main process never loads it.
+  - '!node_modules/react/**'
+  - '!node_modules/react-dom/**'
+  - '!node_modules/scheduler/**'
+asar: true
+# No native modules to rebuild.
+npmRebuild: false
+win:
+  target:
+    - target: portable
+      arch:
+        - x64
+portable:
+  artifactName: ${productName}-${version}-portable-x64.exe
+publish: null
