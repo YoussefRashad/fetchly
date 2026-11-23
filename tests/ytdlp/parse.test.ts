@@ -216,6 +216,9 @@ describe('classifyError', () => {
     ['ERROR: [youtube] abc: Private video. Sign in if you have been granted access', 'failed', 'login required'],
     ['ERROR: [youtube] x: Private video', 'skipped', 'private'],
     ['ERROR: [youtube] abc: Video unavailable', 'skipped', 'removed'],
+    // F1: the text yt-dlp gave for a removed video inside a playlist.
+    ['ERROR: [youtube] zzzzzzzzzz0: This video is unavailable', 'skipped', 'removed'],
+    ['ERROR: [youtube] abc: This video is unavailable. Sign in to confirm your age', 'failed', 'login required'],
     ['ERROR: [youtube] abc: Video unavailable. This video is not available in your country', 'skipped', 'unavailable in region'],
     ['ERROR: [youtube] abc: Video unavailable. Sign in, it is not available in your country', 'failed', 'login required'],
     ['ERROR: [youtube] abc: This video is age-restricted', 'failed', 'login required'],

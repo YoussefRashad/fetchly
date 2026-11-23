@@ -159,6 +159,25 @@ describe('probeUrl', () => {
     expect(await reasonOf(probe('probe-garbage'))).toBe('could not read the video information');
   });
 
+  describe('the 64 MB limit on video information', () => {
+    const CAP = 64 * 1024 * 1024;
+    afterEach(() => {
+      delete process.env['FAKE_YTDLP_PROBE_BYTES'];
+    });
+
+    it('reads video information of exactly the limit', async () => {
+      process.env['FAKE_YTDLP_PROBE_BYTES'] = String(CAP);
+      expect(await probe('probe-sized')).toMatchObject({ kind: 'media', title: 'Huge', heights: [720] });
+    }, 30000);
+
+    it('reports one byte over the limit as unreadable, without "try again"', async () => {
+      process.env['FAKE_YTDLP_PROBE_BYTES'] = String(CAP + 1);
+      const reason = await reasonOf(probe('probe-sized'));
+      expect(reason).toBe('could not read the video information');
+      expect(reason).not.toMatch(/try again/iu);
+    }, 30000);
+  });
+
   it('gives up on a probe that hangs', async () => {
     expect(await reasonOf(probe('probe-hang', neverFetch, 300))).toBe('timed out reading the link');
   });
