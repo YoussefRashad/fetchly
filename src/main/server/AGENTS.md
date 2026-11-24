@@ -5,7 +5,8 @@ Applies to work under `src/main/server/`, and to `src/shared/protocol.ts`, which
 files serve. The root AGENTS.md still applies.
 
 This is the browser-facing trust boundary: the local HTTP server, its routes and the pairing store. Treat every
-change here, and every change to the extension's client side (`extension/src/**`), as **sensitive**: the owner reviews the diff line by line before it is committed.
+change here, and every change to the extension's client side (`extension/src/**`, see `extension/AGENTS.md`), as
+**sensitive**: the owner reviews the diff line by line before it is committed.
 
 Rules, each enforced by the code today:
 

@@ -35,7 +35,7 @@ Threat model and planned routes (hand-off, logins, cookies): the frozen
 
 Extension (`extension/src/**`): the client side of the same boundary; it holds the token
 (`src/lib/store.ts`) and talks to the server through `src/lib/client.ts`. Same review class as the server. Its own
-rules are not documented here yet (`TODO.md`).
+rules: `extension/AGENTS.md`; its side of the protocol: `docs/api-conventions.md`.
 
 ## 2. Persisted state (migration-class)
 

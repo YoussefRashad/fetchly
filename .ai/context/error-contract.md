@@ -31,11 +31,26 @@ Fetchly has three error surfaces. Each has one shape; do not invent a fourth.
 
 ## 2. IPC (renderer-facing)
 
-- Every handler returns `Result<T>` = `{ ok: true, value }` or `{ ok: false, error: string }`
-  (`src/shared/types.ts`). `guarded()` in `src/main/ipc.ts` turns anything thrown into `{ ok: false }`.
-- `error` texts are English constants in `ipc.ts` (`BAD_REQUEST`, `statusText`, `describe`). The renderer shows
-  them as they are, except job reasons, which `reasonText` translates through `S.reasons` (keyed by the English
-  text). A new user-visible error that is not a job reason is therefore not translated: see `TODO.md`.
+- Every handler returns `Result<T>` = `{ ok: true, value, warning? }` or `{ ok: false } & ErrorInfo`
+  (`src/shared/types.ts`). `ErrorInfo` is `{ error, code?, detail? }`: `error` is the English text, `code` an
+  `ErrorCode`, `detail` the raw OS or tool message a detail code puts into its text. `guarded()` in
+  `src/main/ipc.ts` turns anything thrown into `{ ok: false }` (`describe`: `invalidLink`, `linkProblem` with the
+  probe reason, else `unexpected` with the message as detail). Text without a code is still possible: install
+  and yt-dlp update errors (`installBinaries`, `updateYtDlp`) stay English by design, an engine error status may
+  carry none, and an unknown pairing-store refusal is passed on as it is.
+- Codes live in `src/shared/errors.ts`: `ERROR_CODES` gives each code a kind (`fixed`, `detail`, `port`,
+  `reason`) and `ERROR_TEXT` the English text of every code that is not a `reason` (a `reason` code's `error` is
+  the reason token), from which main builds those failures. Engine and server error statuses carry the same
+  `code` (with `detail` or `port`).
+- The window turns them into text in one place, `src/renderer/src/errors.ts` (`errorText`, `statusMessage`,
+  `noticeText`), through `S.errors` in English and Arabic; `reason` codes go through `S.reasons`. A code the
+  window does not know, or one missing its detail or port, shows the text as it came (English, inside one isolate
+  in Arabic).
+  `tests/renderer/consumers.test.ts` checks that no other window file reads `.error` or `.message`.
+- A new user-visible error: add a code and its kind to `ERROR_CODES`, its English text to `ERROR_TEXT` (no
+  `ERROR_TEXT` entry for a `reason` code), and its
+  Arabic text to `S.errors` in `strings.ar.ts`. The bare save error of the download list keeps its
+  `SAVE_FAILED_PREFIX` and is split by `saveErrorText`.
 
 ## 3. In the window
 
