@@ -25,6 +25,13 @@ describe('statusParts, every state in both languages', () => {
     [makeJob({ state: 'paused' }), ['paused'], ['متوقف مؤقتًا']],
     [makeJob({ state: 'paused', interrupted: true, bytesDone: 80, bytesTotal: 200 }), ['paused 40%', 'waiting for a check'], [`متوقف مؤقتًا ${fsi('40%')}`, 'في انتظار الفحص']],
     [makeJob({ state: 'paused', interrupted: true }), ['paused', 'waiting for a check'], ['متوقف مؤقتًا', 'في انتظار الفحص']],
+    [makeJob({ state: 'paused', ...half, resumable: false }), ['paused 25%', 'cannot resume'], [`متوقف مؤقتًا ${fsi('25%')}`, 'لا يدعم الاستئناف']],
+    [
+      makeJob({ state: 'paused', ...half, interrupted: true, resumable: false }),
+      ['paused 25%', 'waiting for a check', 'cannot resume'],
+      [`متوقف مؤقتًا ${fsi('25%')}`, 'في انتظار الفحص', 'لا يدعم الاستئناف'],
+    ],
+    [makeJob({ state: 'paused', resumable: false }), ['paused', 'cannot resume'], ['متوقف مؤقتًا', 'لا يدعم الاستئناف']],
     [makeJob({ state: 'merging' }), ['finishing…'], ['جارٍ الإنهاء…']],
     [makeJob({ state: 'done' }), ['done'], ['مكتمل']],
     [makeJob({ state: 'failed', reason: null }), ['failed'], ['فشل']],
@@ -39,6 +46,21 @@ describe('statusParts, every state in both languages', () => {
     setLanguage('ar');
     expect(statusParts(job)).toEqual(ar);
     expect(statusText(job)).toBe(ar.join(' · '));
+  });
+
+  it('joins the three parts of a paused job that is cut off and cannot resume, in the fixed order', () => {
+    const job = makeJob({ state: 'paused', ...half, interrupted: true, resumable: false });
+    expect(statusText(job)).toBe('paused 25% · waiting for a check · cannot resume');
+    expect(statusText(makeJob({ state: 'paused', ...half, resumable: false }))).toBe('paused 25% · cannot resume');
+  });
+
+  it('(+) resumable: false adds no part for queued, probing, merging, done, failed and skipped, in both languages', () => {
+    for (const state of ['queued', 'probing', 'merging', 'done', 'failed', 'skipped'] as const) {
+      for (const lang of ['en', 'ar'] as const) {
+        setLanguage(lang);
+        expect(statusParts(makeJob({ state, resumable: false })), `${state} in ${lang}`).toEqual(statusParts(makeJob({ state })));
+      }
+    }
   });
 
   it('keeps an unknown English reason as it came, without isolates', () => {

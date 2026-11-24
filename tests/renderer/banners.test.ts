@@ -24,12 +24,14 @@ describe('banners', () => {
 
   it('shows the engine error with Retry', () => {
     expect(banners(status({ state: 'error', message: 'The file download service stopped' }), snap())).toEqual([
-      { id: 'engine', text: 'The file download service stopped', action: 'retryEngines' },
+      { id: 'engine', text: 'The file download service stopped', action: 'retryEngines', tone: 'bad', opens: null },
     ]);
   });
 
   it('shows the engine error text as it is, even when empty', () => {
-    expect(banners(status({ state: 'error', message: '' }), snap())).toEqual([{ id: 'engine', text: '', action: 'retryEngines' }]);
+    expect(banners(status({ state: 'error', message: '' }), snap())).toEqual([
+      { id: 'engine', text: '', action: 'retryEngines', tone: 'bad', opens: null },
+    ]);
   });
 
   it.each<EngineStatus>([{ state: 'starting' }, { state: 'ready' }, { state: 'notInstalled' }])(
@@ -41,7 +43,7 @@ describe('banners', () => {
 
   it('shows the save error without a button', () => {
     expect(banners(status(READY, 'EACCES: permission denied'), snap())).toEqual([
-      { id: 'save', text: 'EACCES: permission denied', action: null },
+      { id: 'save', text: 'EACCES: permission denied', action: null, tone: 'bad', opens: null },
     ]);
   });
 
@@ -50,18 +52,18 @@ describe('banners', () => {
   });
 
   it('shows the save banner for an empty error text (only null means saved)', () => {
-    expect(banners(status(READY, ''), snap())).toEqual([{ id: 'save', text: '', action: null }]);
+    expect(banners(status(READY, ''), snap())).toEqual([{ id: 'save', text: '', action: null, tone: 'bad', opens: null }]);
   });
 
   it('shows the save error in every engine state', () => {
     const engines: EngineStatus[] = [{ state: 'notInstalled' }, { state: 'starting' }, { state: 'ready' }];
     for (const engine of engines) {
-      expect(banners(status(engine, 'disk full'), snap())).toEqual([{ id: 'save', text: 'disk full', action: null }]);
+      expect(banners(status(engine, 'disk full'), snap())).toEqual([{ id: 'save', text: 'disk full', action: null, tone: 'bad', opens: null }]);
     }
   });
 
   describe('shows the cut-off banner only while a job is cut off', () => {
-    const cutOff = { id: 'cutOff', text: CUT_OFF_TEXT, action: 'confirmStraysGone' };
+    const cutOff = { id: 'cutOff', text: CUT_OFF_TEXT, action: 'confirmStraysGone', tone: 'warn', opens: null };
 
     it('no job at all: no banner', () => {
       expect(banners(status(READY), snap())).toEqual([]);
@@ -100,10 +102,12 @@ describe('banners', () => {
     );
     expect(result.map((b) => b.id)).toEqual(['engine', 'save', 'cutOff']);
     expect(result).toEqual([
-      { id: 'engine', text: 'The download tools could not be started: boom', action: 'retryEngines' },
-      { id: 'save', text: 'disk full', action: null },
-      { id: 'cutOff', text: CUT_OFF_TEXT, action: 'confirmStraysGone' },
+      { id: 'engine', text: 'The download tools could not be started: boom', action: 'retryEngines', tone: 'bad', opens: null },
+      { id: 'save', text: 'disk full', action: null, tone: 'bad', opens: null },
+      { id: 'cutOff', text: CUT_OFF_TEXT, action: 'confirmStraysGone', tone: 'warn', opens: null },
     ]);
+    expect(result.map((b) => b.tone)).toEqual(['bad', 'bad', 'warn']);
+    expect(result.map((b) => b.opens)).toEqual([null, null, null]);
   });
 
   it('keeps the order when only two causes are present', () => {
@@ -112,5 +116,48 @@ describe('banners', () => {
       'cutOff',
     ]);
     expect(banners(status(READY, 'y'), snap([makeJob({ state: 'paused', interrupted: true })])).map((b) => b.id)).toEqual(['save', 'cutOff']);
+  });
+});
+
+// C2 section 5.8, added assertions (+): the tone and opens of the engine, save and cut-off banners.
+describe('the tone and opens of the engine, save and cut-off banners', () => {
+  const ENGINES: EngineStatus[] = [{ state: 'notInstalled' }, { state: 'starting' }, READY];
+  const cutOffJobs = (): Job[] => [makeJob({ state: 'paused', interrupted: true })];
+
+  it('engine is bad, save is bad, cutOff is warn, and none of the three opens anything', () => {
+    const result = banners(status({ state: 'error', message: 'e' }, 'disk full'), snap(cutOffJobs()));
+    expect(result.map((b) => b.id)).toEqual(['engine', 'save', 'cutOff']);
+    expect(result.map((b) => b.tone)).toEqual(['bad', 'bad', 'warn']);
+    expect(result.map((b) => b.opens)).toEqual([null, null, null]);
+  });
+
+  it('(+) every banner has exactly the keys action, id, opens, text, tone', () => {
+    const result = banners(status({ state: 'error', message: 'e' }, 'disk full'), snap(cutOffJobs()));
+    expect(result).toHaveLength(3);
+    for (const b of result) expect(Object.keys(b).sort()).toEqual(['action', 'id', 'opens', 'text', 'tone']);
+  });
+
+  it('the actions are as before: retryEngines, none, confirmStraysGone', () => {
+    const result = banners(status({ state: 'error', message: 'e' }, 'disk full'), snap(cutOffJobs()));
+    expect(result.map((b) => b.action)).toEqual(['retryEngines', null, 'confirmStraysGone']);
+  });
+
+  it('the tone and opens do not depend on the text, even when it is empty', () => {
+    const result = banners(status({ state: 'error', message: '' }, ''), snap(cutOffJobs()));
+    expect(result.map((b) => [b.id, b.text === '' ? 'empty' : 'text', b.tone, b.opens])).toEqual([
+      ['engine', 'empty', 'bad', null],
+      ['save', 'empty', 'bad', null],
+      ['cutOff', 'text', 'warn', null],
+    ]);
+  });
+
+  it('the save and cut-off tones hold in every engine state', () => {
+    for (const engine of ENGINES) {
+      const result = banners(status(engine, 'disk full'), snap(cutOffJobs()));
+      expect(result.map((b) => [b.id, b.tone, b.opens])).toEqual([
+        ['save', 'bad', null],
+        ['cutOff', 'warn', null],
+      ]);
+    }
   });
 });

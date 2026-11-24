@@ -1,4 +1,4 @@
-import type { Job, Settings } from '../src/shared/types';
+import type { Job, JobLive, Settings } from '../src/shared/types';
 
 let seq = 0;
 
@@ -30,6 +30,11 @@ export function makeJob(over: Partial<Job> = {}): Job {
     sourceHeight: null,
     ...over,
   };
+}
+
+/** A live entry with every field "not known" (null); `over` sets the fields a test cares about. */
+export function makeLive(over: Partial<JobLive> = {}): JobLive {
+  return { stream: null, segments: null, connections: null, ...over };
 }
 
 export function makeSettings(over: Partial<Settings> = {}): Settings {
