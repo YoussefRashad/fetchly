@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readdirSync, rmSync } from 'node:fs';
 import { extname, join, win32 } from 'node:path';
 import type { AddRequest, Group, GroupVerb, Job, JobVerb, Result, Settings, Snapshot } from '../../shared/types';
-import type { Engine, EngineEvent } from '../engines/engine';
+import { ExtrasError, type Engine, type EngineEvent, type RunExtras } from '../engines/engine';
 import { dirKey, freeName, itemBaseName, nameConflicts, sanitizeName } from '../naming';
 import { ACTIVE, canApply, transition, type JobEvent } from './state';
 import type { Store } from './store';
@@ -18,6 +18,8 @@ const SAVE_PROGRESS_EVERY_MS = 5000;
 const PAUSE_NOT_CONFIRMED = 'Could not confirm that the download stopped. It is still listed as running; try again.';
 const CANCEL_NOT_CONFIRMED = 'Could not confirm that the download stopped, so nothing was deleted. It is still in the list; try again.';
 const CLOSING = 'Fetchly is closing';
+/** A start whose extras could not be made for a reason that is not an ExtrasError; the error's own text is never shown. */
+const COULD_NOT_START = 'could not start the download';
 const CUT_OFF =
   'This download was cut off and Fetchly could not check that its old process is gone. End yt-dlp, ffmpeg and aria2c in Task Manager, then choose "They are gone" in the banner, or restart Fetchly.';
 
@@ -72,6 +74,11 @@ export interface QueueDeps {
    * done: marks the file as coming from the internet. Best effort; anything it throws is ignored.
    */
   markDownloaded?: (path: string, url: string) => void;
+  /**
+   * The extras of one engine start, called once per start with the job after its start transition. Synchronous.
+   * A throw fails that job: the reason of an ExtrasError, else "could not start the download"; no engine starts it.
+   */
+  extrasFor: (job: Job) => RunExtras | null;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
 }
@@ -104,6 +111,7 @@ export class Queue {
   private readonly media: Engine;
   private readonly file: QueueDeps['file'];
   private readonly markDownloaded: (path: string, url: string) => void;
+  private readonly extrasFor: (job: Job) => RunExtras | null;
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
 
@@ -123,6 +131,8 @@ export class Queue {
   private readonly changedListeners: ((s: Snapshot) => void)[] = [];
   private readonly finishedListeners: ((e: Finished) => void)[] = [];
   private readonly saveListeners: ((error: string | null) => void)[] = [];
+  /** The groups announced so far in the running outer state change (announcingOnce); null outside one. */
+  private announcedGroups: Set<string> | null = null;
   private lastNotify = 0;
   private notifyPending = false;
   private lastSave = 0;
@@ -136,6 +146,7 @@ export class Queue {
     this.media = deps.media;
     this.file = deps.file;
     this.markDownloaded = deps.markDownloaded ?? (() => undefined);
+    this.extrasFor = deps.extrasFor;
     this.jobs = [...deps.initial.jobs];
     if (deps.straysCleared) this.jobs = this.jobs.map((j) => (j.interrupted ? { ...j, interrupted: false } : j));
     this.groups = [...deps.initial.groups];
@@ -411,8 +422,10 @@ export class Queue {
     this.cancelling.delete(id);
     this.waiting.delete(id);
     this.remove(id);
-    this.commit();
-    if (announce && !wasTerminal) this.announceGroupAfterCancel(job.groupId);
+    this.announcingOnce(() => {
+      this.commit();
+      if (announce && !wasTerminal) this.announceGroupAfterCancel(job.groupId);
+    });
     return ok();
   }
 
@@ -525,8 +538,10 @@ export class Queue {
           // best effort: a drive that cannot hold the mark never fails the download
         }
         this.replace({ ...next, bytesDone: next.bytesTotal ?? next.bytesDone });
-        this.commit();
-        this.announce(job);
+        this.announcingOnce(() => {
+          this.commit();
+          this.announce(job);
+        });
         return;
       }
       case 'error':
@@ -554,8 +569,28 @@ export class Queue {
     }
     const type = ev.outcome === 'skipped' && canApply(job, 'skip') ? 'skip' : 'fail';
     this.apply(job.id, { type, reason: ev.reason });
-    this.commit();
-    this.announce(job);
+    this.announcingOnce(() => {
+      this.commit();
+      this.announce(job);
+    });
+  }
+
+  /**
+   * Runs one outer state change (an engine's end of a job, or a job-level cancel) in which each group is announced at
+   * most once: the commit inside it may end the same group by a failed start (B1). The record is dropped afterwards,
+   * so a group that is retried and ends again is announced again. A call inside a running one joins it.
+   */
+  private announcingOnce(run: () => void): void {
+    if (this.announcedGroups !== null) {
+      run();
+      return;
+    }
+    this.announcedGroups = new Set();
+    try {
+      run();
+    } finally {
+      this.announcedGroups = null;
+    }
   }
 
   /** Tells listeners that a lone job, or the whole group of `job`, has nothing left to do. */
@@ -584,6 +619,9 @@ export class Queue {
   }
 
   private emitGroup(groupId: string, members: Job[], fallbackTitle: string): void {
+    // Inside one outer state change, a group already announced is not announced again (announcingOnce).
+    if (this.announcedGroups?.has(groupId)) return;
+    this.announcedGroups?.add(groupId);
     const group = this.groups.find((g) => g.id === groupId);
     this.emitFinished({
       kind: 'group',
@@ -618,21 +656,59 @@ export class Queue {
     return started;
   }
 
-  /** After a state change: transition, prune empty groups, save, then start the engines and tell the window. */
+  /**
+   * After a state change: transition, prune empty groups, save, then start the engines; tell the window once.
+   * Each start first asks extrasFor (X17). A job it throws for fails without an engine call, its attempts and data
+   * untouched, and its freed slot is filled by another round of this loop: never by a call to itself. Each such
+   * round ends at least one job, so the loop ends. The jobs that failed so are announced after the one notify.
+   */
   private commit(): void {
-    const started = this.schedule();
-    this.groups = this.groups.filter((g) => this.jobs.some((j) => j.groupId === g.id));
-    this.save();
-    if (started.length > 0) {
-      const limit = this.share();
+    const failedAtStart: Job[] = [];
+    for (;;) {
+      const started = this.schedule();
+      this.groups = this.groups.filter((g) => this.jobs.some((j) => j.groupId === g.id));
+      this.save();
+      if (started.length === 0) break;
+
+      const ready: { job: Job; extras: RunExtras | null }[] = [];
+      let failedThisRound = false;
       for (const id of started) {
         const job = this.find(id);
         if (!job) continue;
-        this.limits.set(id, limit);
-        this.engineOf(job).start(job, { settings: this.settings, rateLimitBytes: limit });
+        let extras: RunExtras | null;
+        try {
+          extras = this.extrasFor(job);
+        } catch (e) {
+          // No text of another throw is forwarded: it may hold a path or a link.
+          this.apply(id, { type: 'fail', reason: e instanceof ExtrasError ? e.reason : COULD_NOT_START });
+          failedAtStart.push(job);
+          failedThisRound = true;
+          continue;
+        }
+        ready.push({ job, extras });
       }
+      // The share counts only the jobs that really start.
+      const limit = this.share();
+      for (const { job, extras } of ready) {
+        this.limits.set(job.id, limit);
+        this.engineOf(job).start(job, { settings: this.settings, rateLimitBytes: limit, extras });
+      }
+      if (!failedThisRound) break;
     }
     this.notify();
+    this.announceFailedStarts(failedAtStart);
+  }
+
+  /** Announces the jobs that failed at start: each lone job once, and each group once when all its members are finished. */
+  private announceFailedStarts(jobs: Job[]): void {
+    const groups = new Set<string>();
+    for (const job of jobs) {
+      if (job.groupId === null) this.announce(job);
+      else if (!groups.has(job.groupId)) {
+        groups.add(job.groupId);
+        this.announce(job);
+      }
+    }
   }
 
   /** After a progress-only change: persist and notify at a bounded rate. */

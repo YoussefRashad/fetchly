@@ -729,6 +729,7 @@ describe('what add accepts loads again from disk', () => {
       initial: { jobs: [], groups: [] },
       settings: makeSettings({ downloadDir: dir }),
       straysCleared: true,
+      extrasFor: () => null,
       setTimer: () => undefined,
     });
     const handlers = createHandlers({ ...deps(), queue: () => queue });
@@ -754,6 +755,7 @@ describe('what add accepts loads again from disk', () => {
       initial: { jobs: [], groups: [] },
       settings: makeSettings({ downloadDir: dir }),
       straysCleared: true,
+      extrasFor: () => null,
       setTimer: () => undefined,
     });
     await createHandlers({ ...deps(), queue: () => queue }).add(listRequest(placeholders()));
@@ -798,6 +800,7 @@ describe('add refuses an array with a hole and leaves the real queue and its fil
       initial: { jobs: [], groups: [] },
       settings: makeSettings({ downloadDir: dir }),
       straysCleared: true,
+      extrasFor: () => null,
       setTimer: () => undefined,
     });
     const handlers = createHandlers({ ...deps(), queue: () => queue });
@@ -1437,6 +1440,7 @@ describe('with the real handlers, Queue and Store (C1, C2, C3)', () => {
       initial: { jobs: [], groups: [] },
       settings: makeSettings({ downloadDir: dir }),
       straysCleared: true,
+      extrasFor: () => null,
       setTimer: () => undefined,
     });
     const saveErrors: (string | null)[] = [];
@@ -1956,6 +1960,7 @@ describe('add passes referer null, userAgent null and oneShotLogin false (A3, M1
         initial: { jobs: [], groups: [] },
         settings: makeSettings({ downloadDir: dir }),
         straysCleared: true,
+        extrasFor: () => null,
         setTimer: () => undefined,
       });
       const h = createHandlers({ ...deps(), queue: () => queue });

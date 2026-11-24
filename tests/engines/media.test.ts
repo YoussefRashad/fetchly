@@ -1,19 +1,26 @@
-import type { ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { EngineEvent, StartContext } from '../../src/main/engines/engine';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { EngineEvent, RunExtras, StartContext } from '../../src/main/engines/engine';
 import { isPartialOf, MediaEngine, type Exe } from '../../src/main/engines/media';
 import { heightProbeArgs } from '../../src/main/ytdlp/args';
 import type { Job } from '../../src/shared/types';
 import { makeJob, makeSettings } from '../helpers';
 import { sleep, waitFor } from '../wait';
 
+// A3: every process the engine starts goes through this spy, which runs the real spawn, so a spec can read the options
+// a start was given (the spawn rule of plan 3.3: `shell: false` is stated, not left to the default).
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return { ...actual, spawn: vi.fn(actual.spawn) };
+});
+
 const FAKE_PATH = resolve('tests/fakes/fake-ytdlp.mjs');
 const FAKE: Exe = { command: process.execPath, prefixArgs: [FAKE_PATH] };
-const ctx: StartContext = { settings: makeSettings(), rateLimitBytes: null };
+const ctx: StartContext = { settings: makeSettings(), rateLimitBytes: null, extras: null };
 /** The existing yt-dlp probe output cap (bytes). */
 const PROBE_CAP = 64 * 1024 * 1024;
 const UNCONFIRMED = 'could not confirm that the download stopped';
@@ -286,7 +293,7 @@ describe('MediaEngine', () => {
     start(
       'ok',
       { quality: { kind: 'max', height: 720 }, subtitleLangs: ['ar'] },
-      { settings: makeSettings({ preferMp4Max1080: true }), rateLimitBytes: 307200 },
+      { settings: makeSettings({ preferMp4Max1080: true }), rateLimitBytes: 307200, extras: null },
     );
     await waitFor(ended);
     const args = JSON.parse(readFileSync(log, 'utf8').trim().split('\n').at(-1) ?? '') as string[];
@@ -398,7 +405,7 @@ describe('MediaEngine height check before a Best download', () => {
     expect(events[0]).toEqual({ jobId: job.id, type: 'probed', sourceHeight: 1080 });
     expect(probedEvents()).toHaveLength(1);
     expect(lines()).toHaveLength(2);
-    expect(lines()[0]).toEqual(heightProbeArgs(job.url));
+    expect(lines()[0]).toEqual(heightProbeArgs(job.url, null));
     const download = lastLine(lines());
     expect(valueOf(download, '-f')).toContain('vcodec^=avc1');
     expect(valueOf(download, '--merge-output-format')).toBe('mp4');
@@ -470,7 +477,7 @@ describe('MediaEngine height check before a Best download', () => {
 
   it('runs no height check with "always mp4"', async () => {
     const lines = argsLog();
-    start('ok', {}, { settings: makeSettings({ preferMp4Max1080: true }), rateLimitBytes: null });
+    start('ok', {}, { settings: makeSettings({ preferMp4Max1080: true }), rateLimitBytes: null, extras: null });
     await waitFor(ended);
     expect(lines()).toHaveLength(1);
   });
@@ -687,5 +694,188 @@ describe('MediaEngine stop and discard', () => {
     await expect(engine.discard(job)).resolves.toBeUndefined();
     expect(existsSync(join(dir, 'Clip.mp4.part'))).toBe(false);
     expect(existsSync(join(dir, 'Clip.f137.mp4'))).toBe(false);
+  });
+});
+
+// A3 Task T2 (plan 3.3, section 6): the headers of ctx.extras on the two yt-dlp starts, `shell: false`, and the promise
+// that A3's engines never read `cookies`.
+describe('MediaEngine headers (A3)', () => {
+  const REFERER = 'https://a.example/watch';
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)';
+  /** PA3-6: every character a shell could treat as special, accepted and passed byte for byte. */
+  const PA3_6 = 'Mozilla/5.0 "q" \\ %PATH% ^ & | < > ` $(x) ; --output=evil -o x';
+  const FOUR = ['--add-headers', `Referer:${REFERER}`, '--add-headers', `User-Agent:${UA}`];
+  const extrasOf = (referer: string | null, userAgent: string | null): RunExtras => ({ referer, userAgent, cookies: null });
+  const withExtras = (extras: RunExtras | null): StartContext => ({ ...ctx, extras });
+  const spawnCalls = (): [string, string[], Record<string, unknown>][] =>
+    vi.mocked(spawn).mock.calls as unknown as [string, string[], Record<string, unknown>][];
+
+  /** `args` without the contiguous `run`, or `args` itself when it holds none. */
+  function without(args: string[], run: string[]): string[] {
+    for (let i = 0; i + run.length <= args.length; i += 1) {
+      if (run.every((v, k) => args[i + k] === v)) return [...args.slice(0, i), ...args.slice(i + run.length)];
+    }
+    return args;
+  }
+  /** The headers in `args` as their `--add-headers <value>` pairs, in order. */
+  const headerValues = (args: string[]): string[] => args.flatMap((a, i) => (a === '--add-headers' ? [args[i + 1] ?? ''] : []));
+
+  /** Runs a default Best job (so a height check runs first) and returns its two argument lists. */
+  async function runBest(extras: RunExtras | null, over: Partial<Job> = {}): Promise<{ check: string[]; download: string[] }> {
+    const lines = argsLog();
+    const before = events.length;
+    start('ok', over, withExtras(extras));
+    await waitFor(() => events.slice(before).some((e) => e.type === 'done' || e.type === 'error'));
+    const all = lines();
+    return { check: all[all.length - 2] ?? [], download: all[all.length - 1] ?? [] };
+  }
+
+  beforeEach(() => {
+    vi.mocked(spawn).mockClear();
+  });
+
+  it('puts both headers on the height check and on the download: four elements before --, nothing else changed', async () => {
+    const headed = await runBest(extrasOf(REFERER, UA));
+    expect(headed.check.slice(-2)).toEqual(['--', 'https://example.com/watch?v=1']);
+    expect(headed.download.slice(-2)).toEqual(['--', 'https://example.com/watch?v=1']);
+    for (const args of [headed.check, headed.download]) {
+      const at = args.findIndex((_a, i) => FOUR.every((v, k) => args[i + k] === v));
+      expect(at).toBeGreaterThanOrEqual(0);
+      expect(at + 4).toBeLessThanOrEqual(args.indexOf('--'));
+    }
+    const plain = await runBest(null);
+    expect(without(headed.check, FOUR)).toEqual(plain.check);
+    expect(without(headed.download, FOUR)).toEqual(plain.download);
+    expect(plain.check).toEqual(heightProbeArgs('https://example.com/watch?v=1', null));
+  });
+
+  it('carries the headers of a download that has no height check as well', async () => {
+    const lines = argsLog();
+    start('ok', { sourceHeight: 720 }, withExtras(extrasOf(REFERER, UA)));
+    await waitFor(ended);
+    expect(lines()).toHaveLength(1);
+    expect(headerValues(lastLine(lines()))).toEqual([`Referer:${REFERER}`, `User-Agent:${UA}`]);
+  });
+
+  it.each([
+    ['a Referer only', extrasOf(REFERER, null), [`Referer:${REFERER}`]],
+    ['a User-Agent only', extrasOf(null, UA), [`User-Agent:${UA}`]],
+  ])('sends %s, and only that header, on both starts', async (_name, extras, expected) => {
+    const { check, download } = await runBest(extras);
+    expect(headerValues(check)).toEqual(expected);
+    expect(headerValues(download)).toEqual(expected);
+  });
+
+  it('sends no header for extras null and for extras with two null values: the same argument lists', async () => {
+    const none = await runBest(null);
+    const allNull = await runBest(extrasOf(null, null));
+    expect(allNull).toEqual(none);
+    expect(headerValues(none.check)).toEqual([]);
+    expect(headerValues(none.download)).toEqual([]);
+    expect(none.check).not.toContain('--add-headers');
+    expect(none.download).not.toContain('--add-headers');
+  });
+
+  it("passes PA3-6's User-Agent as exactly one element on each start, byte for byte, and adds no other element", async () => {
+    const headed = await runBest(extrasOf(null, PA3_6));
+    const plain = await runBest(null);
+    for (const [got, base] of [
+      [headed.check, plain.check],
+      [headed.download, plain.download],
+    ] as const) {
+      expect(got.filter((a) => a === `User-Agent:${PA3_6}`)).toHaveLength(1);
+      expect(got).toHaveLength(base.length + 2);
+      expect(without(got, ['--add-headers', `User-Agent:${PA3_6}`])).toEqual(base);
+    }
+  });
+
+  it.each([
+    ['a Referer with CR LF', extrasOf('https://a.example/p\r\nX: y', null)],
+    ['a Referer with a query', extrasOf('https://a.example/p?token=1', null)],
+    ['a Referer with a double quote', extrasOf('https://a.example/p"q', null)],
+    ['a User-Agent with LF', extrasOf(null, 'a\nb')],
+    ['a User-Agent with NUL', extrasOf(null, 'a\u0000b')],
+    ['a User-Agent of 513 characters', extrasOf(null, 'a'.repeat(513))],
+    ['a User-Agent that is not a string', extrasOf(null, 7 as unknown as string)],
+  ])('adds no element for %s, even handed straight to the engine', async (_name, extras) => {
+    const plain = await runBest(null);
+    const got = await runBest(extras);
+    expect(got).toEqual(plain);
+  });
+
+  it('starts every process with shell false stated, the command of the exe unchanged and its prefix first', async () => {
+    await runBest(extrasOf(REFERER, UA));
+    const calls = spawnCalls();
+    expect(calls).toHaveLength(2); // the height check and the download
+    for (const [command, args, options] of calls) {
+      expect(command).toBe(FAKE.command);
+      expect(args.slice(0, FAKE.prefixArgs.length)).toEqual(FAKE.prefixArgs);
+      expect(options['shell']).toBe(false);
+      expect(options['windowsHide']).toBe(true);
+    }
+  });
+
+  it('states shell false for the download that has no height check too', async () => {
+    start('ok', { sourceHeight: 720 }, withExtras(extrasOf(REFERER, UA)));
+    await waitFor(ended);
+    const calls = spawnCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[2]['shell']).toBe(false);
+    expect(calls[0]?.[0]).toBe(FAKE.command);
+  });
+
+  it('never reads cookies: a source that throws when touched changes nothing, and no cookie argument exists', async () => {
+    const touched = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('cookies was read');
+        },
+        has: () => {
+          throw new Error('cookies was read');
+        },
+        ownKeys: () => {
+          throw new Error('cookies was read');
+        },
+        getOwnPropertyDescriptor: () => {
+          throw new Error('cookies was read');
+        },
+      },
+    );
+    const extras = { referer: REFERER, userAgent: UA, cookies: touched } as unknown as RunExtras;
+    const plain = await runBest(extrasOf(REFERER, UA));
+    const got = await runBest(extras);
+    expect(got).toEqual(plain);
+    expect(events.at(-1)).toMatchObject({ type: 'done' }); // the run with the untouchable source finished as usual
+    for (const a of [...got.check, ...got.download]) expect(/cookie/iu.test(a)).toBe(false);
+  });
+
+  it('gives each start the headers of its own context: a later job with none gets none, and a restart gets what it is given', async () => {
+    const first = await runBest(extrasOf(REFERER, UA));
+    expect(headerValues(first.download)).toHaveLength(2);
+    const second = await runBest(null);
+    expect(headerValues(second.download)).toEqual([]);
+    expect(headerValues(second.check)).toEqual([]);
+
+    // The same job stopped and started again with other headers.
+    const lines = argsLog();
+    const seen = lines().length; // the log is shared with the two runs above
+    process.env['FAKE_YTDLP'] = 'hang';
+    const job = makeJob({ dir, baseName: 'Again', sourceHeight: 720 });
+    running.push(job);
+    engine.start(job, withExtras(extrasOf(REFERER, null)));
+    await waitFor(() => lines().length >= seen + 1);
+    await engine.stop(job.id);
+    process.env['FAKE_YTDLP'] = 'ok';
+    engine.start(job, withExtras(extrasOf(null, UA)));
+    await waitFor(() => lines().length >= seen + 2);
+    expect(headerValues(lines()[seen] ?? [])).toEqual([`Referer:${REFERER}`]);
+    expect(headerValues(lines()[seen + 1] ?? [])).toEqual([`User-Agent:${UA}`]);
+  });
+
+  it('a hostile User-Agent through the real process arrives whole: the log of the process holds it as one argument', async () => {
+    const { download } = await runBest(extrasOf(REFERER, PA3_6));
+    expect(download.filter((a) => a === `User-Agent:${PA3_6}`)).toHaveLength(1);
+    expect(download.filter((a) => a.startsWith('--output'))).toEqual([]);
   });
 });

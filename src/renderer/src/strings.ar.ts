@@ -79,6 +79,9 @@ export const AR: Strings = {
     'download was removed': 'أُزيل التنزيل من خدمة التنزيل',
     'the download service stopped': 'توقفت خدمة التنزيل',
     'the download service is not running': 'خدمة التنزيل لا تعمل',
+    'the sign-in sent with this link was not kept; send it again from the browser':
+      'لم يُحتفظ بتسجيل الدخول المرسل مع هذا الرابط؛ أرسله مرة أخرى من المتصفح',
+    'could not start the download': 'تعذّر بدء التنزيل',
   },
   size: {
     mediaHint: 'حجم الجزء الجاري تنزيله الآن؛ يُنزَّل الفيديو والصوت كلٌّ على حدة.',

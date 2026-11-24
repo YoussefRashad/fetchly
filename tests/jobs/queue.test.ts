@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeEach, describe, expect, it } from 'vitest';
-import type { Engine, EngineEvent, EngineListener, StartContext } from '../../src/main/engines/engine';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ExtrasError, type Engine, type EngineEvent, type EngineListener, type RunExtras, type StartContext } from '../../src/main/engines/engine';
+import { composeExtras, noSignIn } from '../../src/main/extras';
 import { Queue, RETRY_DELAYS_MS, SAVE_RETRY_MS } from '../../src/main/jobs/queue';
 import type { QueueAdd } from '../../src/main/jobs/queue';
 import type { Store } from '../../src/main/jobs/store';
@@ -74,7 +75,7 @@ function buildBare(
   settings: Partial<Settings> = {},
   initial: Snapshot = { jobs: [], groups: [] },
   straysCleared = true,
-  extra: Pick<ConstructorParameters<typeof Queue>[0], 'markDownloaded'> = {},
+  extra: Partial<Pick<ConstructorParameters<typeof Queue>[0], 'markDownloaded' | 'extrasFor'>> = {},
 ): Queue {
   const store = {
     saveSnapshot: (s: Snapshot) => {
@@ -90,14 +91,20 @@ function buildBare(
     initial,
     settings: makeSettings(settings),
     straysCleared,
+    extrasFor: () => null,
     now: () => clock,
     setTimer: (fn, ms) => timers.push({ fn, ms }),
     ...extra,
   });
 }
 
-function build(settings: Partial<Settings> = {}, initial: Snapshot = { jobs: [], groups: [] }, straysCleared = true): Queue {
-  const queue = buildBare(settings, initial, straysCleared);
+function build(
+  settings: Partial<Settings> = {},
+  initial: Snapshot = { jobs: [], groups: [] },
+  straysCleared = true,
+  extra: Partial<Pick<ConstructorParameters<typeof Queue>[0], 'markDownloaded' | 'extrasFor'>> = {},
+): Queue {
+  const queue = buildBare(settings, initial, straysCleared, extra);
   queue.onFinished((e) => finished.push(e));
   queue.onChanged(() => (changes += 1));
   return queue;
@@ -3981,5 +3988,784 @@ describe('the total of a media download (UI spec 2b)', () => {
     media.emit({ jobId: id, type: 'progress', bytesDone: 70, bytesTotal: null, speed: 5, eta: null });
     media.emit({ jobId: id, type: 'done', fileName: 'Talk.mp4', actualHeight: 720 });
     expect(jobAt(q, 0)).toMatchObject({ state: 'done', bytesDone: 70, bytesTotal: null });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A3 Task T3 (plan 3.4, X17, B4): `QueueDeps.extrasFor(job)` is called by `commit`, once per engine start, with the job
+// after its start transition. A throw fails that job (no engine call, attempts unchanged, partial data kept, announced
+// once) and the freed slot is filled by the same commit's next round: a loop, no re-entry, one notify at the end.
+// ---------------------------------------------------------------------------------------------------------------------
+describe('extrasFor at every engine start (A3)', () => {
+  const COULD_NOT_START = 'could not start the download';
+  const COOKIES_GONE = 'the sign-in sent with this link was not kept; send it again from the browser';
+  const REFERER = 'https://a.example/watch';
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)';
+  const extrasOf = (job: Job): RunExtras => ({ referer: `https://a.example/${job.id}`, userAgent: null, cookies: null });
+  const RETRY_TIMERS = (): Timer[] => timers.filter((t) => RETRY_DELAYS_MS.includes(t.ms));
+
+  /** An extrasFor that records its calls and answers a distinct object for each job. */
+  function recorder(throwFor: (job: Job) => unknown = () => undefined): {
+    extrasFor: (job: Job) => RunExtras;
+    seen: Job[];
+    answers: Map<string, RunExtras>;
+  } {
+    const seen: Job[] = [];
+    const answers = new Map<string, RunExtras>();
+    return {
+      seen,
+      answers,
+      extrasFor: (job) => {
+        seen.push(job);
+        const thrown = throwFor(job);
+        if (thrown !== undefined) throw thrown;
+        const answer = extrasOf(job);
+        answers.set(job.id, answer);
+        return answer;
+      },
+    };
+  }
+
+  it('is called once per engine start, with the started job after its start transition, and its answer is the start’s extras', () => {
+    const r = recorder();
+    const q = build({}, undefined, true, { extrasFor: r.extrasFor });
+    q.add(video('A'));
+    q.add(fileReq('f.zip'));
+    expect(r.seen).toHaveLength(2);
+    expect(r.seen.map((j) => j.state)).toEqual(['probing', 'probing']);
+    expect(r.seen.map((j) => j.kind)).toEqual(['media', 'file']);
+    expect(r.seen[0]).toEqual(media.started[0]?.job);
+    expect(r.seen[1]).toEqual(file.started[0]?.job);
+    expect(media.started[0]?.ctx.extras).toBe(r.answers.get(r.seen[0]?.id ?? ''));
+    expect(file.started[0]?.ctx.extras).toBe(r.answers.get(r.seen[1]?.id ?? ''));
+  });
+
+  it('hands the engine null when extrasFor answers null (not undefined)', () => {
+    const q = build({}, undefined, true, { extrasFor: () => null });
+    q.add(video('A'));
+    q.add(fileReq('f.zip'));
+    expect(media.started[0]?.ctx.extras).toBeNull();
+    expect(file.started[0]?.ctx.extras).toBeNull();
+  });
+
+  it('is called for jobs that start and for no other: not for a waiting job, a skipped item or a paused one', () => {
+    const r = recorder();
+    const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: r.extrasFor });
+    q.add(video('A'));
+    q.add(video('B'));
+    expect(r.seen.map((j) => j.title)).toEqual(['A']); // B waits for the slot
+    media.emit(done(jobAt(q, 0).id));
+    expect(r.seen.map((j) => j.title)).toEqual(['A', 'B']);
+
+    const r2 = recorder();
+    const q2 = build({}, undefined, true, { extrasFor: r2.extrasFor });
+    q2.add(playlist(3, { unavailable: [2] }));
+    expect(r2.seen.map((j) => j.index)).toEqual([1, 3]); // the skipped placeholder never starts
+  });
+
+  it('is not called again by progress, by a settings save or by a notify: only by a start', () => {
+    const r = recorder();
+    const q = build({}, undefined, true, { extrasFor: r.extrasFor });
+    q.add(video('A'));
+    const id = jobAt(q, 0).id;
+    media.emit(progress(id));
+    media.emit(progress(id, 50));
+    q.setSettings(makeSettings({ maxConcurrent: 2 }));
+    expect(r.seen).toHaveLength(1);
+  });
+
+  it('is called again for a resume, a retry and a retry after a failure the engine called retryable', async () => {
+    const r = recorder();
+    const q = build({}, undefined, true, { extrasFor: r.extrasFor });
+    q.add(video('A'));
+    const id = jobAt(q, 0).id;
+    expect(r.seen).toHaveLength(1);
+
+    expect(await q.job(id, 'pause')).toEqual(OK);
+    expect(r.seen).toHaveLength(1); // a pause starts nothing
+    expect(await q.job(id, 'resume')).toEqual(OK);
+    expect(r.seen).toHaveLength(2);
+    expect(r.seen[1]).toMatchObject({ id, state: 'probing' });
+    expect(media.started).toHaveLength(2);
+
+    media.emit(error(id, 'nope', false));
+    expect(jobAt(q, 0).state).toBe('failed');
+    expect(await q.job(id, 'retry')).toEqual(OK);
+    expect(r.seen).toHaveLength(3);
+    expect(media.started).toHaveLength(3);
+
+    media.emit(error(id, 'net', true)); // the engine says: try again after a delay
+    expect(r.seen).toHaveLength(3);
+    fire(RETRY_DELAYS_MS[0] ?? 0);
+    expect(r.seen).toHaveLength(4);
+    expect(media.started).toHaveLength(4);
+    for (const call of r.seen) expect(call.id).toBe(id);
+  });
+
+  describe('a throw of ExtrasError', () => {
+    const throwsExtras = (): ((job: Job) => RunExtras) => () => {
+      throw new ExtrasError(COOKIES_GONE);
+    };
+
+    // Factories, not requests: `dir` is made by beforeEach, after the table is built.
+    it.each([
+      ['a video', () => video('A'), () => media],
+      ['a file', () => fileReq('f.zip'), () => file],
+    ])('fails %s with its reason: no engine call, one finished event, saved', (_name, req, engineOf) => {
+      const q = build({}, undefined, true, { extrasFor: throwsExtras() });
+      q.add(req());
+      expect(engineOf().started).toHaveLength(0);
+      expect(engineOf().stopped).toEqual([]);
+      expect(engineOf().discarded).toEqual([]);
+      expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: COOKIES_GONE, attempts: 0, speed: 0, eta: null });
+      expect(finished).toEqual([{ kind: 'job', title: jobAt(q, 0).title, failed: 1, skipped: 0 }]);
+      expect(saves.at(-1)?.jobs[0]).toMatchObject({ state: 'failed', reason: COOKIES_GONE, attempts: 0 });
+      expect(loadedLastSave()).not.toBeNull(); // the failed list loads again
+      expect(RETRY_TIMERS()).toEqual([]); // no retry is scheduled
+    });
+
+    it('leaves attempts, bytesDone, the partial file and the retry state of the job as they were', () => {
+      writeFileSync(join(dir, 'Clip.mp4.part'), 'partial');
+      const job = makeJob({ id: 'p1', dir, baseName: 'Clip', title: 'Clip', state: 'queued', attempts: 2, bytesDone: 500, bytesTotal: 1000 });
+      const q = build({}, { jobs: [job], groups: [] }, true, { extrasFor: throwsExtras() });
+      expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: COOKIES_GONE, attempts: 2, bytesDone: 500, bytesTotal: 1000 });
+      expect(media.started).toHaveLength(0);
+      expect(media.discarded).toEqual([]);
+      expect(existsSync(join(dir, 'Clip.mp4.part'))).toBe(true);
+      expect(RETRY_TIMERS()).toEqual([]);
+    });
+
+    it('does not count as an attempt: a job the engine failed once keeps attempts 1 when the next start throws, and nothing is retried', () => {
+      let broken = false;
+      const q = build({}, undefined, true, {
+        extrasFor: () => {
+          if (broken) throw new ExtrasError(COOKIES_GONE);
+          return null;
+        },
+      });
+      q.add(video('A'));
+      const id = jobAt(q, 0).id;
+      broken = true;
+      media.emit(error(id, 'net', true)); // retry 1 of 3 is scheduled
+      expect(jobAt(q, 0)).toMatchObject({ state: 'queued', attempts: 1 });
+      fire(RETRY_DELAYS_MS[0] ?? 0);
+      expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: COOKIES_GONE, attempts: 1 });
+      expect(media.started).toHaveLength(1);
+      expect(RETRY_TIMERS()).toEqual([]);
+      expect(finished.filter((f) => f.failed === 1)).toHaveLength(1);
+    });
+
+    it('fails a resumed job and a retried job the same way, each announced once', async () => {
+      let broken = false;
+      const q = build({}, undefined, true, {
+        extrasFor: () => {
+          if (broken) throw new ExtrasError(COOKIES_GONE);
+          return null;
+        },
+      });
+      q.add(video('A'));
+      const id = jobAt(q, 0).id;
+      expect(await q.job(id, 'pause')).toEqual(OK);
+      broken = true;
+      expect(await q.job(id, 'resume')).toEqual(OK);
+      expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: COOKIES_GONE, attempts: 0 });
+      expect(finished).toHaveLength(1);
+      expect(await q.job(id, 'retry')).toEqual(OK); // retry sets attempts to 0, and the start throws again
+      expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: COOKIES_GONE, attempts: 0 });
+      expect(finished).toHaveLength(2);
+      expect(media.started).toHaveLength(1);
+      broken = false;
+      expect(await q.job(id, 'retry')).toEqual(OK);
+      expect(jobAt(q, 0).state).toBe('probing');
+      expect(media.started).toHaveLength(2);
+    });
+  });
+
+  describe('a throw of anything else', () => {
+    class LookalikeError extends Error {
+      readonly reason = 'SECRET-MARKER reason';
+    }
+    it.each<[string, unknown]>([
+      ['an Error', new Error('SECRET-MARKER at D:\\SECRET-MARKER-dir\\path with https://x.example/?token=SECRET-MARKER')],
+      ['a TypeError', new TypeError('SECRET-MARKER')],
+      ['an Error with a reason field that is not an ExtrasError', Object.assign(new Error('SECRET-MARKER'), { reason: 'SECRET-MARKER' })],
+      ['an Error subclass with a reason', new LookalikeError('SECRET-MARKER')],
+      ['a string', 'SECRET-MARKER'],
+      ['a plain object with a reason', { reason: 'SECRET-MARKER', message: 'SECRET-MARKER' }],
+      ['null', null],
+      ['a number', 42],
+    ])('fails with the fixed text and forwards none of the text of the throw (%s)', (_name, thrown) => {
+      const q = buildBare({}, undefined, true, {
+        extrasFor: () => {
+          throw thrown;
+        },
+      });
+      const snapshots: string[] = [];
+      q.onChanged((s) => snapshots.push(JSON.stringify(s)));
+      q.onFinished((e) => finished.push(e));
+      q.add(video('A'));
+      expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: COULD_NOT_START, attempts: 0 });
+      expect(media.started).toHaveLength(0);
+      expect(finished).toHaveLength(1);
+      const everything = JSON.stringify({ snapshots, saves, finished, now: q.snapshot() });
+      expect(everything).not.toContain('SECRET-MARKER');
+      expect(loadedLastSave()).not.toBeNull();
+    });
+
+    it('keeps the fixed text for every start path: a file job, a resume and a retry', async () => {
+      let broken = false;
+      const q = build({}, undefined, true, {
+        extrasFor: () => {
+          if (broken) throw new Error('SECRET-MARKER');
+          return null;
+        },
+      });
+      q.add(fileReq('f.zip'));
+      const id = jobAt(q, 0).id;
+      await q.job(id, 'pause');
+      broken = true;
+      await q.job(id, 'resume');
+      expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: COULD_NOT_START });
+      await q.job(id, 'retry');
+      expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: COULD_NOT_START });
+      expect(JSON.stringify(saves)).not.toContain('SECRET-MARKER');
+    });
+  });
+
+  describe('the freed slot (a loop, not a recursion)', () => {
+    it('maxConcurrent 1: the first item throws and the second starts in the same commit; the saved list shows both; one notify', () => {
+      const r = recorder((job) => (job.index === 1 ? new ExtrasError('first reason') : undefined));
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: r.extrasFor });
+      changes = 0;
+      q.add(playlist(2));
+      expect(states(q)).toEqual(['failed', 'probing']);
+      expect(jobAt(q, 0)).toMatchObject({ reason: 'first reason', attempts: 0 });
+      expect(media.started).toHaveLength(1);
+      expect(media.started[0]?.job.index).toBe(2);
+      expect(media.started[0]?.ctx.extras).toBe(r.answers.get(jobAt(q, 1).id));
+      expect(saves.at(-1)?.jobs.map((j) => j.state)).toEqual(['failed', 'probing']);
+      expect(changes).toBe(1);
+    });
+
+    it('maxConcurrent 1 and the first item ok: the second still waits and extrasFor was not asked about it', () => {
+      const r = recorder();
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: r.extrasFor });
+      q.add(playlist(2));
+      expect(states(q)).toEqual(['probing', 'queued']);
+      expect(r.seen.map((j) => j.index)).toEqual([1]);
+    });
+
+    it.each([1, 2, 3])('three jobs that all throw (maxConcurrent %i): all failed, commit returns, one notify, one group announcement', (maxConcurrent) => {
+      const r = recorder(() => new ExtrasError('no sign-in'));
+      const q = build({ maxConcurrent }, undefined, true, { extrasFor: r.extrasFor });
+      changes = 0;
+      q.add(playlist(3));
+      expect(states(q)).toEqual(['failed', 'failed', 'failed']);
+      expect(q.snapshot().jobs.map((j) => j.reason)).toEqual(['no sign-in', 'no sign-in', 'no sign-in']);
+      expect(media.started).toHaveLength(0);
+      expect(r.seen).toHaveLength(3);
+      expect(changes).toBe(1);
+      expect(finished).toEqual([{ kind: 'group', title: 'React: Course?', failed: 3, skipped: 0 }]);
+      expect(saves.at(-1)?.jobs.map((j) => j.state)).toEqual(['failed', 'failed', 'failed']);
+    });
+
+    it('three stored jobs that all throw at the queue’s own start: all failed, and no slot stays held by them', () => {
+      let broken = true;
+      const jobs = [1, 2, 3].map((n) => makeJob({ id: `lone-${n}`, dir, baseName: `L${n}`, title: `L${n}`, state: 'queued', createdAt: n }));
+      const q = build({ maxConcurrent: 1 }, { jobs, groups: [] }, true, {
+        extrasFor: () => {
+          if (broken) throw new ExtrasError('no sign-in');
+          return null;
+        },
+      });
+      expect(states(q)).toEqual(['failed', 'failed', 'failed']);
+      expect(media.started).toHaveLength(0);
+      // The slot is free: with maxConcurrent 1, a new job starts at once.
+      broken = false;
+      q.add(video('N'));
+      expect(states(q)).toEqual(['failed', 'failed', 'failed', 'probing']);
+      expect(media.started).toHaveLength(1);
+    });
+
+    it('does not grow the call stack from one round to the next: a loop, never a recursion', () => {
+      const limit = Error.stackTraceLimit;
+      Error.stackTraceLimit = Infinity;
+      const depths: number[] = [];
+      try {
+        const q = build({ maxConcurrent: 1 }, undefined, true, {
+          extrasFor: () => {
+            depths.push((new Error().stack ?? '').split('\n').length);
+            throw new ExtrasError('no sign-in');
+          },
+        });
+        q.add(playlist(40));
+      } finally {
+        Error.stackTraceLimit = limit;
+      }
+      expect(depths).toHaveLength(40);
+      expect(Math.max(...depths) - Math.min(...depths)).toBeLessThanOrEqual(4);
+    });
+
+    it.each([1, 2, 3])('two start in one round and item %i throws: the others start, each with its own extras', (bad) => {
+      const r = recorder((job) => (job.index === bad ? new ExtrasError('x') : undefined));
+      const q = build({ maxConcurrent: 3 }, undefined, true, { extrasFor: r.extrasFor });
+      q.add(playlist(3));
+      const expected = [1, 2, 3].filter((n) => n !== bad);
+      expect(media.started.map((s) => s.job.index).sort()).toEqual(expected);
+      for (const s of media.started) expect(s.ctx.extras).toBe(r.answers.get(s.job.id));
+      expect(new Set(media.started.map((s) => s.ctx.extras)).size).toBe(2); // each its own object
+      expect(q.snapshot().jobs.map((j) => (j.index === bad ? j.state : 'ok')).filter((s) => s !== 'ok')).toEqual(['failed']);
+      expect(q.snapshot().jobs.filter((j) => j.state === 'probing')).toHaveLength(2);
+    });
+
+    it('a long chain of throwing starts ends without a stack overflow, with one notify', () => {
+      const light = { saveSnapshot: () => undefined } as unknown as Store;
+      const q = new Queue({
+        store: light,
+        media,
+        file,
+        initial: { jobs: [], groups: [] },
+        settings: makeSettings({ maxConcurrent: 1 }),
+        straysCleared: true,
+        extrasFor: () => {
+          throw new ExtrasError('no sign-in');
+        },
+        now: () => clock,
+        setTimer: (fn, ms) => timers.push({ fn, ms }),
+      });
+      let notified = 0;
+      q.onChanged(() => (notified += 1));
+      q.onFinished((e) => finished.push(e));
+      q.add(playlist(3000));
+      expect(q.snapshot().jobs).toHaveLength(3000);
+      expect(q.snapshot().jobs.every((j) => j.state === 'failed')).toBe(true);
+      expect(notified).toBe(1);
+      expect(finished).toHaveLength(1);
+      expect(media.started).toHaveLength(0);
+    }, 60000);
+  });
+
+  describe('with the real composition, composeExtras(noSignIn)', () => {
+    it('a job stored with oneShotLogin true fails at start with the cookies-gone text, attempts unchanged, and the next queued job starts', () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: composeExtras(noSignIn) });
+      q.add(video('C'));
+      q.add({ ...video('A'), oneShotLogin: true, referer: REFERER, userAgent: UA });
+      q.add({ ...video('B'), referer: 'https://a.example/p', userAgent: UA });
+      expect(states(q)).toEqual(['probing', 'queued', 'queued']);
+      media.emit(done(jobAt(q, 0).id));
+      expect(states(q)).toEqual(['done', 'failed', 'probing']);
+      expect(jobAt(q, 1)).toMatchObject({ reason: COOKIES_GONE, attempts: 0, oneShotLogin: true });
+      expect(media.started.map((s) => s.job.title)).toEqual(['C', 'B']);
+      expect(media.started[0]?.ctx.extras).toBeNull();
+      expect(media.started[1]?.ctx.extras).toStrictEqual({ referer: 'https://a.example/p', userAgent: UA, cookies: null });
+    });
+
+    it('a group job stored with oneShotLogin true fails at start the same way (A3-Q16)', () => {
+      const group = { id: 'g1', title: 'G', url: 'https://example.com/list', dir, createdAt: 1 };
+      const job = makeJob({ id: 'g1-1', groupId: 'g1', index: 1, dir, baseName: '01 - G', title: 'G', state: 'queued', oneShotLogin: true });
+      const q = build({}, { jobs: [job], groups: [group] }, true, { extrasFor: composeExtras(noSignIn) });
+      expect(jobAt(q, 0)).toMatchObject({ state: 'failed', reason: COOKIES_GONE, attempts: 0, oneShotLogin: true });
+      expect(media.started).toHaveLength(0);
+    });
+
+    it('a job added with headers reaches the engine with them, as one RunExtras with cookies null', () => {
+      const q = build({}, undefined, true, { extrasFor: composeExtras(noSignIn) });
+      q.add({ ...video('H'), referer: REFERER, userAgent: UA });
+      q.add({ ...fileReq('f.zip'), referer: REFERER, userAgent: null });
+      expect(media.started[0]?.ctx.extras).toStrictEqual({ referer: REFERER, userAgent: UA, cookies: null });
+      expect(file.started[0]?.ctx.extras).toStrictEqual({ referer: REFERER, userAgent: null, cookies: null });
+    });
+
+    it('playlist items inherit the headers and never a sign-in: they start although oneShotLogin true was passed to add', () => {
+      const q = build({}, undefined, true, { extrasFor: composeExtras(noSignIn) });
+      q.add({ ...playlist(2), referer: REFERER, userAgent: UA, oneShotLogin: true });
+      expect(states(q)).toEqual(['probing', 'probing']);
+      for (const s of media.started) expect(s.ctx.extras).toStrictEqual({ referer: REFERER, userAgent: UA, cookies: null });
+      expect(q.snapshot().jobs.every((j) => !j.oneShotLogin)).toBe(true);
+    });
+
+    it('a job with no header and no sign-in starts with extras null', () => {
+      const q = build({}, undefined, true, { extrasFor: composeExtras(noSignIn) });
+      q.add(video('A'));
+      expect(media.started[0]?.ctx.extras).toBeNull();
+    });
+  });
+
+  it('calls a spy extrasFor with the job only (one argument)', () => {
+    const spy = vi.fn<(job: Job) => RunExtras | null>(() => null);
+    const q = build({}, undefined, true, { extrasFor: spy });
+    q.add(video('A'));
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A3a review, B1: a group is announced once per state change. An engine event that ends a member (done, a final failure)
+// and a job-level cancel both call `commit`, which starts the next waiting job. When that job's extras throw, `commit`
+// announces the group itself (it is finished now) and returns to its caller, which announces the same group again.
+// The all-extras-fail specs above never end another member in the same call, so they never saw two events.
+// A later retry is unchanged: a group is announced each time it next ends (the retry specs pin that rule).
+// ---------------------------------------------------------------------------------------------------------------------
+describe('a group is announced once when a start fails inside the call that ended its other member (A3, B1)', () => {
+  const GROUP = 'React: Course?';
+  const COOKIES_GONE = 'the sign-in sent with this link was not kept; send it again from the browser';
+  const COULD_NOT_START = 'could not start the download';
+  const groupEvent = (failed: number, skipped = 0, title = GROUP) => ({ kind: 'group', title, failed, skipped });
+  const noSignInText = (): unknown => new ExtrasError('no sign-in');
+
+  /** An extrasFor that throws for the playlist items with these numbers and answers null for every other job. */
+  const failingItems =
+    (numbers: number[], thrown: () => unknown = noSignInText) =>
+    (job: Job): RunExtras | null => {
+      if (job.index !== null && numbers.includes(job.index)) throw thrown();
+      return null;
+    };
+
+  describe('an engine event ends a member', () => {
+    it.each<[string, () => unknown, string]>([
+      ['an ExtrasError', noSignInText, 'no sign-in'],
+      ['any other error', () => new Error('SECRET-MARKER'), COULD_NOT_START],
+    ])('done: A finishes and the extras of the waiting B throw (%s): one group event', (_name, thrown, reason) => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: failingItems([2], thrown) });
+      q.add(playlist(2));
+      expect(states(q)).toEqual(['probing', 'queued']);
+      media.emit(done(jobAt(q, 0).id));
+      expect(states(q)).toEqual(['done', 'failed']);
+      expect(jobAt(q, 1)).toMatchObject({ reason, attempts: 0 });
+      expect(media.started).toHaveLength(1); // only A ever started
+      expect(finished).toEqual([groupEvent(1)]);
+      expect(JSON.stringify(finished)).not.toContain('SECRET-MARKER');
+    });
+
+    it('three members, B and C throw in the same commit: one event that counts both failures', () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: failingItems([2, 3]) });
+      q.add(playlist(3));
+      media.emit(done(jobAt(q, 0).id));
+      expect(states(q)).toEqual(['done', 'failed', 'failed']);
+      expect(finished).toEqual([groupEvent(2)]);
+    });
+
+    it('a skipped placeholder is counted as skipped in that one event', () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: failingItems([2]) });
+      q.add(playlist(3, { unavailable: [3] }));
+      expect(states(q)).toEqual(['probing', 'queued', 'skipped']);
+      media.emit(done(jobAt(q, 0).id));
+      expect(states(q)).toEqual(['done', 'failed', 'skipped']);
+      expect(finished).toEqual([groupEvent(1, 1)]);
+    });
+
+    it('a failure that is not retried: A fails for good and B fails at its start: one event counting both', () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: failingItems([2]) });
+      q.add(playlist(2));
+      media.emit(error(jobAt(q, 0).id, 'disk full', false));
+      expect(states(q)).toEqual(['failed', 'failed']);
+      expect(jobAt(q, 0).reason).toBe('disk full');
+      expect(finished).toEqual([groupEvent(2)]);
+    });
+
+    it('a skipped outcome of A: one event with one failure and one skipped', () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: failingItems([2]) });
+      q.add(playlist(2));
+      media.emit(error(jobAt(q, 0).id, 'private', false, 'skipped'));
+      expect(states(q)).toEqual(['skipped', 'failed']);
+      expect(finished).toEqual([groupEvent(1, 1)]);
+    });
+
+    it('a done event that names no file ends A as a failure: one event counting both', () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: failingItems([2]) });
+      q.add(playlist(2));
+      media.emit({ jobId: jobAt(q, 0).id, type: 'done', fileName: '', actualHeight: null });
+      expect(states(q)).toEqual(['failed', 'failed']);
+      expect(jobAt(q, 0).reason).toBe('finished without a file');
+      expect(finished).toEqual([groupEvent(2)]);
+    });
+
+    // Not a duplicate today; it stops a fix from announcing a group that is not finished.
+    it('a failure that will be retried does not end the group: nothing is announced until the retry ends', () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: failingItems([2]) });
+      q.add(playlist(2));
+      media.emit(error(jobAt(q, 0).id, 'HTTP Error 503', true));
+      expect(states(q)).toEqual(['queued', 'failed']);
+      expect(finished).toEqual([]);
+      fire(RETRY_DELAYS_MS[0] ?? 0);
+      expect(states(q)).toEqual(['probing', 'failed']);
+      expect(finished).toEqual([]);
+      media.emit(done(jobAt(q, 0).id));
+      expect(finished).toEqual([groupEvent(1)]);
+    });
+
+    // Not a duplicate today; it stops a fix from announcing early, or from swallowing the one real event.
+    it('another member still runs: nothing is announced when B fails, one event when the last one ends', () => {
+      const q = build({ maxConcurrent: 2 }, undefined, true, { extrasFor: failingItems([3]) });
+      q.add(playlist(3));
+      expect(states(q)).toEqual(['probing', 'probing', 'queued']);
+      media.emit(done(jobAt(q, 0).id));
+      expect(states(q)).toEqual(['done', 'probing', 'failed']);
+      expect(finished).toEqual([]);
+      media.emit(done(jobAt(q, 1).id));
+      expect(finished).toEqual([groupEvent(1)]);
+    });
+
+    it('the freed slot goes on to a later member that does start: one event, when that member ends', () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: failingItems([2]) });
+      q.add(playlist(3));
+      media.emit(done(jobAt(q, 0).id));
+      expect(states(q)).toEqual(['done', 'failed', 'probing']);
+      expect(finished).toEqual([]);
+      media.emit(done(jobAt(q, 2).id));
+      expect(finished).toEqual([groupEvent(1)]);
+    });
+  });
+
+  describe('a job-level cancel ends a member', () => {
+    it.each(['probing', 'downloading', 'merging'] as const)('A is cancelled while %s and the extras of the waiting B throw: one group event', async (state) => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: failingItems([2]) });
+      q.add(playlist(2));
+      const a = jobAt(q, 0).id;
+      if (state !== 'probing') media.emit(progress(a));
+      if (state === 'merging') media.emit({ jobId: a, type: 'merging' });
+      expect(jobAt(q, 0).state).toBe(state);
+      expect(await q.job(a, 'cancel')).toEqual(OK);
+      expect(media.discarded).toEqual([a]);
+      expect(q.snapshot().jobs.map((j) => [j.index, j.state])).toEqual([[2, 'failed']]);
+      expect(finished).toEqual([groupEvent(1)]);
+    });
+
+    it('three members, A is cancelled and B and C throw: one event that counts both failures', async () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: failingItems([2, 3]) });
+      q.add(playlist(3));
+      expect(await q.job(jobAt(q, 0).id, 'cancel')).toEqual(OK);
+      expect(states(q)).toEqual(['failed', 'failed']);
+      expect(finished).toEqual([groupEvent(2)]);
+    });
+
+    it('a skipped placeholder is counted as skipped in that one event', async () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: failingItems([2]) });
+      q.add(playlist(3, { unavailable: [3] }));
+      expect(await q.job(jobAt(q, 0).id, 'cancel')).toEqual(OK);
+      expect(states(q)).toEqual(['failed', 'skipped']);
+      expect(finished).toEqual([groupEvent(1, 1)]);
+    });
+
+    // Not a duplicate today: a group cancel announces nothing, and the other group's failed start is its own one event.
+    it('a group cancel announces nothing itself; another group whose start then fails is announced once', async () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, {
+        extrasFor: (job) => {
+          if (job.dir.endsWith('G2')) throw new ExtrasError('no sign-in');
+          return null;
+        },
+      });
+      q.add(playlist(1, { title: 'G1' }));
+      q.add(playlist(1, { title: 'G2' }));
+      expect(states(q)).toEqual(['probing', 'queued']);
+      expect(await q.group(groupAt(q, 0).id, 'cancel')).toEqual(OK);
+      expect(q.snapshot().groups.map((g) => g.title)).toEqual(['G2']);
+      expect(states(q)).toEqual(['failed']);
+      expect(finished).toEqual([groupEvent(1, 0, 'G2')]);
+    });
+  });
+
+  // Not duplicates today. They stop a fix that removes the second event by dropping a different, real one.
+  describe('different things that end in one call are each announced once', () => {
+    const failsInG2 = (job: Job): RunExtras | null => {
+      if (job.dir.endsWith('G2')) throw new ExtrasError('no sign-in');
+      return null;
+    };
+    const byTitle = (a: { title: string }, b: { title: string }): number => a.title.localeCompare(b.title);
+
+    it('two groups: the one A belongs to and the one whose members fail at their start', () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: failsInG2 });
+      q.add(playlist(1, { title: 'G1' }));
+      q.add(playlist(2, { title: 'G2' }));
+      expect(states(q)).toEqual(['probing', 'queued', 'queued']);
+      media.emit(done(jobAt(q, 0).id));
+      expect(states(q)).toEqual(['done', 'failed', 'failed']);
+      expect([...finished].sort(byTitle)).toEqual([groupEvent(0, 0, 'G1'), groupEvent(2, 0, 'G2')]);
+    });
+
+    it('two groups that have the same title (the same playlist added twice): one event each', () => {
+      let failGroup: string | null = null;
+      const q = build({ maxConcurrent: 1 }, undefined, true, {
+        extrasFor: (job) => {
+          if (failGroup !== null && job.groupId === failGroup) throw new ExtrasError('no sign-in');
+          return null;
+        },
+      });
+      q.add(playlist(1));
+      q.add(playlist(1));
+      failGroup = groupAt(q, 1).id;
+      expect(states(q)).toEqual(['probing', 'queued']);
+      expect(groupAt(q, 0).title).toBe(groupAt(q, 1).title);
+      media.emit(done(jobAt(q, 0).id));
+      expect(states(q)).toEqual(['done', 'failed']);
+      expect([...finished].sort((x, y) => x.failed - y.failed)).toEqual([groupEvent(0), groupEvent(1)]);
+    });
+
+    it('a group whose member fails at its start, and the lone job that finished: one event each', () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: failsInG2 });
+      q.add(video('Lone'));
+      q.add(playlist(1, { title: 'G2' }));
+      media.emit(done(jobAt(q, 0).id));
+      expect(states(q)).toEqual(['done', 'failed']);
+      expect([...finished].sort(byTitle)).toEqual([groupEvent(1, 0, 'G2'), { kind: 'job', title: 'Lone', failed: 0, skipped: 0 }]);
+    });
+
+    it('two lone jobs: the one that finished and the one whose start failed, one event each', () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, {
+        extrasFor: (job) => {
+          if (job.title === 'B') throw new ExtrasError('no sign-in');
+          return null;
+        },
+      });
+      q.add(video('A'));
+      q.add(video('B'));
+      media.emit(done(jobAt(q, 0).id));
+      expect(states(q)).toEqual(['done', 'failed']);
+      expect([...finished].sort(byTitle)).toEqual([
+        { kind: 'job', title: 'A', failed: 0, skipped: 0 },
+        { kind: 'job', title: 'B', failed: 1, skipped: 0 },
+      ]);
+    });
+  });
+
+  // The retry rule (read from `announce`, today's code): a retry announces nothing by itself; every time the group
+  // is finished again, whatever ended it, it is announced again with the counts of that moment. The first two specs
+  // fail a member at its own start (a resume), outside any other member's call, so they hold before and after the fix.
+  describe('a retry after the group was announced', () => {
+    let broken: boolean;
+    beforeEach(() => {
+      broken = true;
+    });
+    const brokenItem2 = (job: Job): RunExtras | null => {
+      if (broken && job.index === 2) throw new ExtrasError(COOKIES_GONE);
+      return null;
+    };
+
+    /** A and B run; B is paused; A finishes (nothing yet); B's resume fails at its start: the group's first event. */
+    async function announcedOnceThroughAResume(): Promise<{ q: Queue; b: string }> {
+      broken = false; // B starts beside A; it breaks only before its resume
+      const q = build({ maxConcurrent: 2 }, undefined, true, { extrasFor: brokenItem2 });
+      q.add(playlist(2));
+      const [a, b] = [jobAt(q, 0).id, jobAt(q, 1).id];
+      expect(await q.job(b, 'pause')).toEqual(OK);
+      media.emit(done(a));
+      expect(finished).toEqual([]); // B is paused: the group is not finished
+      broken = true;
+      expect(await q.job(b, 'resume')).toEqual(OK);
+      expect(states(q)).toEqual(['done', 'failed']);
+      expect(finished).toEqual([groupEvent(1)]);
+      return { q, b };
+    }
+
+    it('a retry that works announces nothing; the group is announced again when the retried member ends', async () => {
+      const { q, b } = await announcedOnceThroughAResume();
+      broken = false;
+      expect(await q.job(b, 'retry')).toEqual(OK);
+      expect(states(q)).toEqual(['done', 'probing']);
+      expect(finished).toEqual([groupEvent(1)]);
+      media.emit(done(b));
+      expect(finished).toEqual([groupEvent(1), groupEvent(0)]);
+    });
+
+    it('a retry that fails at its start is one more event, and the retry after that is one more at its end', async () => {
+      const { q, b } = await announcedOnceThroughAResume();
+      expect(await q.job(b, 'retry')).toEqual(OK); // still broken
+      expect(states(q)).toEqual(['done', 'failed']);
+      expect(finished).toEqual([groupEvent(1), groupEvent(1)]);
+      broken = false;
+      expect(await q.job(b, 'retry')).toEqual(OK);
+      expect(finished).toHaveLength(2);
+      media.emit(done(b));
+      expect(finished).toEqual([groupEvent(1), groupEvent(1), groupEvent(0)]);
+    });
+
+    it('after the engine-event case: B is retried, and the group is announced again when B ends', async () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: brokenItem2 });
+      q.add(playlist(2));
+      media.emit(done(jobAt(q, 0).id));
+      expect(finished).toEqual([groupEvent(1)]);
+      broken = false;
+      expect(await q.job(jobAt(q, 1).id, 'retry')).toEqual(OK);
+      expect(states(q)).toEqual(['done', 'probing']);
+      expect(finished).toHaveLength(1);
+      media.emit(done(jobAt(q, 1).id));
+      expect(finished).toEqual([groupEvent(1), groupEvent(0)]);
+    });
+
+    it('after a final failure of A: A is retried, and the group is announced again with the counts of that moment', async () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: brokenItem2 });
+      q.add(playlist(2));
+      media.emit(error(jobAt(q, 0).id, 'disk full', false));
+      expect(finished).toEqual([groupEvent(2)]);
+      expect(await q.job(jobAt(q, 0).id, 'retry')).toEqual(OK);
+      expect(states(q)).toEqual(['probing', 'failed']);
+      expect(finished).toHaveLength(1);
+      media.emit(done(jobAt(q, 0).id));
+      expect(finished).toEqual([groupEvent(2), groupEvent(1)]);
+    });
+
+    it('after a cancel: B is retried, and the group, now of one member, is announced again when it ends', async () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: brokenItem2 });
+      q.add(playlist(2));
+      expect(await q.job(jobAt(q, 0).id, 'cancel')).toEqual(OK);
+      expect(finished).toEqual([groupEvent(1)]);
+      broken = false;
+      expect(await q.job(jobAt(q, 0).id, 'retry')).toEqual(OK);
+      expect(states(q)).toEqual(['probing']);
+      expect(finished).toHaveLength(1);
+      media.emit(done(jobAt(q, 0).id));
+      expect(finished).toEqual([groupEvent(1), groupEvent(0)]);
+    });
+  });
+
+  describe('with the real composition, composeExtras(noSignIn), and a stored member with oneShotLogin true (A3-Q16)', () => {
+    /** Group G: A runs (index 1) and B (index 2) waits; B holds the sign-in flag a group item can only get from a stored list. */
+    function storedGroup(): Queue {
+      const group: Group = { id: 'g1', title: 'G', url: 'https://example.com/list', dir, createdAt: 1 };
+      const a = makeJob({ id: 'g1-1', groupId: 'g1', index: 1, dir, baseName: '01 - A', title: 'A', state: 'probing' });
+      const b = makeJob({ id: 'g1-2', groupId: 'g1', index: 2, dir, baseName: '02 - B', title: 'B', state: 'queued', oneShotLogin: true });
+      const q = build({ maxConcurrent: 1 }, { jobs: [a, b], groups: [group] }, true, { extrasFor: composeExtras(noSignIn) });
+      expect(states(q)).toEqual(['probing', 'queued']);
+      return q;
+    }
+    const groupG = (failed: number) => groupEvent(failed, 0, 'G');
+
+    it('A finishes: B fails with the cookies-gone text, attempts unchanged, and the group is announced once', () => {
+      const q = storedGroup();
+      media.emit(done('g1-1'));
+      expect(states(q)).toEqual(['done', 'failed']);
+      expect(jobAt(q, 1)).toMatchObject({ reason: COOKIES_GONE, attempts: 0, oneShotLogin: true });
+      expect(media.started).toHaveLength(0);
+      expect(finished).toEqual([groupG(1)]);
+    });
+
+    it('A fails for good: both fail and the group is announced once', () => {
+      const q = storedGroup();
+      media.emit(error('g1-1', 'disk full', false));
+      expect(states(q)).toEqual(['failed', 'failed']);
+      expect(jobAt(q, 1).reason).toBe(COOKIES_GONE);
+      expect(finished).toEqual([groupG(2)]);
+    });
+
+    it('A is cancelled: B fails with the cookies-gone text and the group is announced once', async () => {
+      const q = storedGroup();
+      expect(await q.job('g1-1', 'cancel')).toEqual(OK);
+      expect(q.snapshot().jobs.map((j) => [j.id, j.state, j.reason])).toEqual([['g1-2', 'failed', COOKIES_GONE]]);
+      expect(finished).toEqual([groupG(1)]);
+    });
+
+    it('a lone job with oneShotLogin true that waits behind a lone job that finishes: one event for each of them', () => {
+      const q = build({ maxConcurrent: 1 }, undefined, true, { extrasFor: composeExtras(noSignIn) });
+      q.add(video('A'));
+      q.add({ ...video('B'), oneShotLogin: true });
+      media.emit(done(jobAt(q, 0).id));
+      expect(states(q)).toEqual(['done', 'failed']);
+      expect(jobAt(q, 1).reason).toBe(COOKIES_GONE);
+      expect([...finished].sort((x, y) => x.title.localeCompare(y.title))).toEqual([
+        { kind: 'job', title: 'A', failed: 0, skipped: 0 },
+        { kind: 'job', title: 'B', failed: 1, skipped: 0 },
+      ]);
+    });
   });
 });

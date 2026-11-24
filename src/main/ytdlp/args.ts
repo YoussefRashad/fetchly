@@ -1,15 +1,44 @@
+import { isUserAgent, reduceReferer } from '../../shared/protocol';
 import type { Quality } from '../../shared/types';
+import type { ProbeHeaders } from '../probe';
 
 export const PROGRESS_PREFIX = 'FETCHLY_PROGRESS';
 export const FILE_PREFIX = 'FETCHLY_FILE';
 
-export function probeArgs(url: string): string[] {
-  return ['-J', '--flat-playlist', '--no-warnings', url];
+/**
+ * The headers a start may send, each checked again whatever its source: a Referer only when it equals its own
+ * reduction (reduceReferer), a User-Agent only when isUserAgent; any other value, a non-string included, becomes
+ * null. Reads `referer` and `userAgent` only. Never throws.
+ */
+export function sendableHeaders(h: { readonly referer: unknown; readonly userAgent: unknown } | null): ProbeHeaders {
+  if (h === null) return { referer: null, userAgent: null };
+  const { referer, userAgent } = h;
+  return {
+    referer: typeof referer === 'string' && reduceReferer(referer) === referer ? referer : null,
+    userAgent: isUserAgent(userAgent) ? userAgent : null,
+  };
+}
+
+/**
+ * `--add-headers Referer:<r>`, then `--add-headers User-Agent:<ua>`, for each header that is sendable. Each value is
+ * the second half of one element, so it can never start an option. A refused value adds nothing.
+ */
+export function headerArgs(headers: ProbeHeaders | null): string[] {
+  const { referer, userAgent } = sendableHeaders(headers);
+  const args: string[] = [];
+  if (referer !== null) args.push('--add-headers', `Referer:${referer}`);
+  if (userAgent !== null) args.push('--add-headers', `User-Agent:${userAgent}`);
+  return args;
+}
+
+/** Flat JSON of a link; `--` so a link can never be read as an option. */
+export function probeArgs(url: string, headers: ProbeHeaders | null): string[] {
+  return ['-J', '--flat-playlist', '--no-warnings', ...headerArgs(headers), '--', url];
 }
 
 /** Full JSON of one video, read before a Best download to learn its real height. */
-export function heightProbeArgs(url: string): string[] {
-  return ['-J', '--no-playlist', '--no-warnings', '--', url];
+export function heightProbeArgs(url: string, headers: ProbeHeaders | null): string[] {
+  return ['-J', '--no-playlist', '--no-warnings', ...headerArgs(headers), '--', url];
 }
 
 export interface DownloadOptions {
@@ -23,6 +52,8 @@ export interface DownloadOptions {
   rateLimitBytes: number | null;
   /** highest height the site offers; null = not known */
   sourceHeight: number | null;
+  /** The Referer and User-Agent to send; null = none. */
+  headers: ProbeHeaders | null;
 }
 
 /**
@@ -81,6 +112,7 @@ export function downloadArgs(o: DownloadOptions): string[] {
   ];
   if (o.subtitleLangs.length > 0) args.push('--write-subs', '--sub-langs', o.subtitleLangs.join(','));
   if (o.rateLimitBytes !== null) args.push('--limit-rate', String(o.rateLimitBytes));
+  args.push(...headerArgs(o.headers));
   // `--` so a url can never be read as an option.
   args.push('--', o.url);
   return args;

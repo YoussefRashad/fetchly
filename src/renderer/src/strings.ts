@@ -86,6 +86,9 @@ export const EN = {
     'download was removed': 'download was removed',
     'the download service stopped': 'the download service stopped',
     'the download service is not running': 'the download service is not running',
+    'the sign-in sent with this link was not kept; send it again from the browser':
+      'the sign-in sent with this link was not kept; send it again from the browser',
+    'could not start the download': 'could not start the download',
   },
   size: {
     mediaHint: 'Size of the part downloading now; video and audio download separately.',

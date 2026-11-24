@@ -23,6 +23,8 @@ export interface QueueLifecycleDeps {
   onSaveState: (error: string | null) => void;
   /** Marks each finished download as coming from the internet (QueueDeps.markDownloaded). */
   markDownloaded?: (path: string, url: string) => void;
+  /** The extras of each engine start (QueueDeps.extrasFor), handed to every queue built here. */
+  extrasFor: QueueDeps['extrasFor'];
 }
 
 /** The queue steps EngineHost runs (F2): construct, wire, dispose; plus an aria2 restart. */
@@ -55,6 +57,7 @@ export function createQueueLifecycle(deps: QueueLifecycleDeps): QueueLifecycle {
         initial,
         settings: deps.settings(),
         straysCleared,
+        extrasFor: deps.extrasFor,
         ...(deps.markDownloaded ? { markDownloaded: deps.markDownloaded } : {}),
       });
       fileOf.set(queue, file);

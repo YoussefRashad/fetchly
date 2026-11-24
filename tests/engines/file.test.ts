@@ -5,7 +5,7 @@ import { createServer as createTcpServer, type AddressInfo, type Server as TcpSe
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { EngineEvent, StartContext } from '../../src/main/engines/engine';
+import type { EngineEvent, RunExtras, StartContext } from '../../src/main/engines/engine';
 import {
   aria2DaemonArgs,
   Aria2RpcError,
@@ -21,7 +21,7 @@ import { active, complete, failed, FakeAria2, refusalMessage, waiting } from '..
 import { makeJob, makeSettings } from '../helpers';
 import { sleep, waitFor } from '../wait';
 
-const ctx: StartContext = { settings: makeSettings(), rateLimitBytes: null };
+const ctx: StartContext = { settings: makeSettings(), rateLimitBytes: null, extras: null };
 
 /** Poll period of the engines built by makeEngine. */
 const POLL = 10;
@@ -1577,5 +1577,211 @@ describe('aria2 daemon command line', () => {
 
   it('keeps RPC on this machine with the per-run secret', () => {
     expect(args).toEqual(expect.arrayContaining(['--enable-rpc', '--rpc-listen-all=false', '--rpc-listen-port=6800', '--rpc-secret=abc']));
+  });
+});
+
+// A3 Task T2 (plan 3.3, section 6): the aria2 `addUri` options. `referer` and `user-agent` are the only header keys
+// and each exists exactly when its value is non-null and valid; the key `header` never exists; `cookies` is never read.
+describe('FileEngine headers (A3)', () => {
+  const REFERER = 'https://a.example/watch';
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)';
+  /** PA3-6: every character a shell could treat as special, accepted and passed byte for byte. */
+  const PA3_6 = 'Mozilla/5.0 "q" \\ %PATH% ^ & | < > ` $(x) ; --output=evil -o x';
+  /** The only keys an addUri of A3 may hold: the three of today and the two header options. */
+  const ALLOWED_KEYS = ['dir', 'max-download-limit', 'out', 'referer', 'user-agent'];
+  const extrasOf = (referer: unknown, userAgent: unknown): RunExtras => ({ referer, userAgent, cookies: null }) as unknown as RunExtras;
+  const withExtras = (extras: RunExtras | null): StartContext => ({ ...ctx, extras });
+
+  /** The options object of the addUri call number `n` (the first by default). */
+  function addUriOptions(n = 0): Record<string, unknown> {
+    const calls = rpc.calls.filter((c) => c.method === 'aria2.addUri');
+    const params = calls[n]?.params;
+    if (!params) throw new Error(`no addUri call number ${n}`);
+    return params[1] as Record<string, unknown>;
+  }
+  /** Every key of every object anywhere inside `value`. */
+  function keysDeep(value: unknown): string[] {
+    if (Array.isArray(value)) return value.flatMap(keysDeep);
+    if (typeof value === 'object' && value !== null) {
+      return Object.entries(value).flatMap(([k, v]) => [k, ...keysDeep(v)]);
+    }
+    return [];
+  }
+  async function addWith(extras: RunExtras | null, over: Partial<Job> = {}): Promise<Record<string, unknown>> {
+    rpc.script(complete(100));
+    const before = events.length;
+    engine.start(fileJob(over), withExtras(extras));
+    await waitFor(() => events.slice(before).some((e) => e.type === 'done' || e.type === 'error'));
+    return addUriOptions(rpc.calls.filter((c) => c.method === 'aria2.addUri').length - 1);
+  }
+
+  it('holds referer and user-agent exactly, beside the options of today, when both are set', async () => {
+    const options = await addWith(extrasOf(REFERER, UA));
+    expect(options).toEqual({ dir, out: 'x.zip', 'max-download-limit': '0', referer: REFERER, 'user-agent': UA });
+    expect(Object.keys(options).sort()).toEqual(ALLOWED_KEYS);
+  });
+
+  it('holds only the key of the header that is non-null: no key at all for a null one', async () => {
+    const referer = await addWith(extrasOf(REFERER, null));
+    expect(Object.keys(referer).sort()).toEqual(['dir', 'max-download-limit', 'out', 'referer']);
+    expect(referer['referer']).toBe(REFERER);
+    const ua = await addWith(extrasOf(null, UA));
+    expect(Object.keys(ua).sort()).toEqual(['dir', 'max-download-limit', 'out', 'user-agent']);
+    expect(ua['user-agent']).toBe(UA);
+  });
+
+  it('adds no key for null values (a key holding null, undefined or an empty string is a key)', async () => {
+    const options = await addWith(extrasOf(null, null));
+    expect(Object.keys(options).sort()).toEqual(['dir', 'max-download-limit', 'out']);
+    expect('referer' in options).toBe(false);
+    expect('user-agent' in options).toBe(false);
+  });
+
+  it('gives the same options for extras null and for extras with two null values', async () => {
+    const none = await addWith(null);
+    const allNull = await addWith(extrasOf(null, null));
+    expect(allNull).toStrictEqual(none);
+    expect(none).toStrictEqual({ dir, out: 'x.zip', 'max-download-limit': '0' });
+  });
+
+  it('never has the key header, whatever the extras are, and no other key outside the five', async () => {
+    const combos = [null, extrasOf(null, null), extrasOf(REFERER, null), extrasOf(null, UA), extrasOf(REFERER, UA), extrasOf(REFERER, PA3_6)];
+    for (const extras of combos) {
+      const options = await addWith(extras);
+      expect('header' in options).toBe(false);
+      expect('headers' in options).toBe(false);
+      for (const key of Object.keys(options)) expect(ALLOWED_KEYS).toContain(key);
+    }
+    // And in no call to aria2 at all.
+    expect(keysDeep(rpc.calls.map((c) => c.params)).filter((k) => /^headers?$/iu.test(k))).toEqual([]);
+  });
+
+  it("passes PA3-6's User-Agent whole, as the value of user-agent, and as nothing else", async () => {
+    const options = await addWith(extrasOf(null, PA3_6));
+    expect(options['user-agent']).toBe(PA3_6);
+    expect(Object.keys(options).sort()).toEqual(['dir', 'max-download-limit', 'out', 'user-agent']);
+    expect(Object.values(options).filter((v) => typeof v === 'string' && v.includes('--output=evil'))).toEqual([PA3_6]);
+  });
+
+  it.each([
+    ['CR', 'https://a.example/p\rq'],
+    ['LF', 'https://a.example/p\nq'],
+    ['CR LF and a second header', 'https://a.example/p\r\nX-Evil: 1'],
+    ['NUL', 'https://a.example/p\u0000q'],
+    ['a tab', 'https://a.example/p\tq'],
+    ['a query', 'https://a.example/p?token=1'],
+    ['a double quote', 'https://a.example/p"q'],
+    ['2049 units', `https://a.example/${'a'.repeat(2049 - 'https://a.example/'.length)}`],
+    ['a number', 5],
+    ['an object', { toString: () => 'https://a.example/' }],
+    ['an array', ['https://a.example/']],
+  ])('adds no key for a Referer that is %s, and no value holds it', async (_name, bad) => {
+    const options = await addWith(extrasOf(bad, null));
+    expect('referer' in options).toBe(false);
+    expect(Object.keys(options).sort()).toEqual(['dir', 'max-download-limit', 'out']);
+    for (const v of Object.values(options)) expect(typeof v === 'string' && typeof bad === 'string' && v.includes(bad)).toBe(false);
+  });
+
+  it.each([
+    ['CR', 'Mozilla\r5.0'],
+    ['LF', 'Mozilla\n5.0'],
+    ['CR LF and a second header', 'Mozilla\r\nX-Evil: 1'],
+    ['NUL', 'Mozilla\u00005.0'],
+    ['a tab', 'Mozilla\t5.0'],
+    ['513 characters', 'a'.repeat(513)],
+    ['a non-ASCII letter', 'Mozilla é'],
+    ['a number', 7],
+    ['an object', { toString: () => 'Mozilla' }],
+  ])('adds no key for a User-Agent that is %s, and no value holds it', async (_name, bad) => {
+    const options = await addWith(extrasOf(null, bad));
+    expect('user-agent' in options).toBe(false);
+    expect(Object.keys(options).sort()).toEqual(['dir', 'max-download-limit', 'out']);
+    for (const v of Object.values(options)) expect(typeof v === 'string' && typeof bad === 'string' && v.includes(bad)).toBe(false);
+  });
+
+  it('still sends the header that is valid when the other is refused', async () => {
+    const a = await addWith(extrasOf('https://a.example/p?token=1', UA));
+    expect(a['user-agent']).toBe(UA);
+    expect('referer' in a).toBe(false);
+    const b = await addWith(extrasOf(REFERER, 'x\r\ny'));
+    expect(b['referer']).toBe(REFERER);
+    expect('user-agent' in b).toBe(false);
+  });
+
+  it('sends a User-Agent of 512 characters and a Referer of 2048 units, the longest accepted', async () => {
+    const longReferer = `https://a.example/${'a'.repeat(2048 - 'https://a.example/'.length)}`;
+    const options = await addWith(extrasOf(longReferer, 'a'.repeat(512)));
+    expect(options['referer']).toBe(longReferer);
+    expect(options['user-agent']).toBe('a'.repeat(512));
+  });
+
+  it('never reads cookies: a source that throws when touched changes nothing, and no cookie key exists', async () => {
+    const touched = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('cookies was read');
+        },
+        has: () => {
+          throw new Error('cookies was read');
+        },
+        ownKeys: () => {
+          throw new Error('cookies was read');
+        },
+        getOwnPropertyDescriptor: () => {
+          throw new Error('cookies was read');
+        },
+      },
+    );
+    const plain = await addWith(extrasOf(REFERER, UA));
+    const options = await addWith({ referer: REFERER, userAgent: UA, cookies: touched } as unknown as RunExtras);
+    expect(options).toStrictEqual(plain);
+    expect(events.at(-1)).toMatchObject({ type: 'done' });
+    for (const key of keysDeep(rpc.calls.map((c) => c.params))) expect(/cookie/iu.test(key)).toBe(false);
+  });
+
+  it('gives each start the headers of its own context: none leaks to a later start, a restart gets what it is given', async () => {
+    const first = await addWith(extrasOf(REFERER, UA));
+    expect(first['referer']).toBe(REFERER);
+    const second = await addWith(extrasOf(null, null), { id: 'job-second', fileName: 'y.zip' });
+    expect('referer' in second).toBe(false);
+    expect('user-agent' in second).toBe(false);
+
+    // The same job stopped and started again with other headers.
+    const job = fileJob({ id: 'job-again', fileName: 'z.zip' });
+    rpc.script(active(10, 100, 5));
+    engine.start(job, withExtras(extrasOf(REFERER, null)));
+    await waitFor(() => rpc.calls.filter((c) => c.method === 'aria2.addUri').length === 3);
+    await engine.stop(job.id);
+    rpc.script(complete(100));
+    engine.start(job, withExtras(extrasOf(null, UA)));
+    await waitFor(() => rpc.calls.filter((c) => c.method === 'aria2.addUri').length === 4);
+    expect(Object.keys(addUriOptions(2)).sort()).toEqual(['dir', 'max-download-limit', 'out', 'referer']);
+    expect(Object.keys(addUriOptions(3)).sort()).toEqual(['dir', 'max-download-limit', 'out', 'user-agent']);
+  });
+
+  it('keeps the other options of the call (dir, out, the limit) when headers are given', async () => {
+    rpc.script(complete(100));
+    engine.start(fileJob(), { ...withExtras(extrasOf(REFERER, UA)), rateLimitBytes: 307200 });
+    await waitFor(ended);
+    expect(addUriOptions()).toEqual({ dir, out: 'x.zip', 'max-download-limit': '307200', referer: REFERER, 'user-agent': UA });
+  });
+
+  it('sends the link alone in the first parameter and no header anywhere but the options', async () => {
+    await addWith(extrasOf(REFERER, UA));
+    const params = rpc.calls[0]?.params ?? [];
+    expect(params).toHaveLength(2);
+    expect(params[0]).toEqual(['https://example.com/x.zip']);
+  });
+
+  it('a speed change after a start sends the limit only, no header, whatever the start carried', async () => {
+    rpc.script(active(10, 100, 5));
+    const job = fileJob();
+    engine.start(job, withExtras(extrasOf(REFERER, UA)));
+    await waitFor(() => rpc.calls.some((c) => c.method === 'aria2.addUri'));
+    expect(await engine.setRateLimit(job.id, 1024)).toBe(true);
+    const change = rpc.calls.find((c) => c.method === 'aria2.changeOption');
+    expect(change?.params[1]).toEqual({ 'max-download-limit': '1024' });
+    await engine.stop(job.id);
   });
 });

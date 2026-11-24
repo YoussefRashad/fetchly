@@ -7,6 +7,7 @@ import { Binaries } from './binaries';
 import { EngineHost } from './engineHost';
 import { FileEngine, startAria2 } from './engines/file';
 import { MediaEngine } from './engines/media';
+import { composeExtras, noSignIn } from './extras';
 import { markFromInternet } from './fileSafety';
 import { createHandlers, type Handlers } from './ipc';
 import type { Queue } from './jobs/queue';
@@ -142,6 +143,8 @@ async function main(): Promise<void> {
       pushStatus();
     },
     markDownloaded: (path, url) => void markFromInternet(path, url),
+    // A3's sign-in step: a job stored with a one-run sign-in cannot start (A5 replaces the step).
+    extrasFor: composeExtras(noSignIn),
   });
 
   const engines = new EngineHost<Queue>({

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { EngineHost } from '../src/main/engineHost';
-import type { Engine } from '../src/main/engines/engine';
+import { ExtrasError, type Engine, type RunExtras, type StartContext } from '../src/main/engines/engine';
 import type { Aria2Daemon } from '../src/main/engines/file';
 import type { Queue } from '../src/main/jobs/queue';
 import { Store } from '../src/main/jobs/store';
@@ -148,6 +148,7 @@ function run(initialJobs: Job[], settings: Partial<Settings> = {}): Run {
     store,
     initial: loaded.snapshot,
     settings: () => current,
+    extrasFor: () => null,
     engines: () => {
       const media = new FakeEngine();
       const file = new FakeEngine();
@@ -417,6 +418,7 @@ describe('marking finished downloads', () => {
       store,
       initial: store.load().snapshot,
       settings: () => makeSettings({ downloadDir: downloads }),
+      extrasFor: () => null,
       engines: () => ({ media, file: new FakeEngine() }),
       send: () => undefined,
       attachTray: () => undefined,
@@ -441,5 +443,77 @@ describe('marking finished downloads', () => {
     const queue = life.createQueue(fakeDaemon(), true);
     media.listener({ jobId: 'v1', type: 'done', fileName: 'v1.mp4', actualHeight: null });
     expect(queue.snapshot().jobs[0]?.state).toBe('done');
+  });
+});
+
+// A3 (plan 3.1): queueLifecycle.ts "passes extrasFor": every queue it builds gets the one function the host composed.
+describe('extras for started downloads (A3)', () => {
+  /** A media engine that keeps the context of every start it is given. */
+  class ContextEngine extends FakeEngine {
+    contexts: { id: string; extras: StartContext['extras'] | undefined }[] = [];
+    override start(job: Job, ctx?: StartContext): void {
+      super.start(job);
+      this.contexts.push({ id: job.id, extras: ctx?.extras });
+    }
+  }
+
+  function lifecycleWith(extrasFor: (job: Job) => RunExtras | null): { life: QueueLifecycle; media: ContextEngine } {
+    const store = new Store(dataDir, downloads);
+    store.saveSnapshot({ jobs: [queuedJob()], groups: [] });
+    const media = new ContextEngine();
+    const life = createQueueLifecycle({
+      store,
+      initial: store.load().snapshot,
+      settings: () => makeSettings({ downloadDir: downloads }),
+      extrasFor,
+      engines: () => ({ media, file: new FakeEngine() }),
+      send: () => undefined,
+      attachTray: () => undefined,
+      onSaveState: () => undefined,
+    });
+    return { life, media };
+  }
+
+  it('hands extrasFor to the queue it builds: the engine start gets what extrasFor answered for the started job', () => {
+    const answer: RunExtras = { referer: 'https://a.example/p', userAgent: 'Mozilla/5.0', cookies: null };
+    const seen: Job[] = [];
+    const { life, media } = lifecycleWith((job) => {
+      seen.push(job);
+      return answer;
+    });
+    life.createQueue(fakeDaemon(), true);
+    expect(seen.map((j) => [j.id, j.state])).toEqual([['v1', 'probing']]);
+    expect(media.contexts).toHaveLength(1);
+    expect(media.contexts[0]?.extras).toBe(answer);
+  });
+
+  it('hands it to every queue it builds, not only the first', async () => {
+    const seen: string[] = [];
+    const { life, media } = lifecycleWith((job) => {
+      seen.push(job.id);
+      return null;
+    });
+    const first = life.createQueue(fakeDaemon(), true);
+    expect(seen).toEqual(['v1']);
+    await life.disposeQueue(first);
+    const second = life.createQueue(fakeDaemon(), true);
+    expect(second.snapshot().jobs[0]?.state).toBe('paused'); // cut off by the dispose, so not started again
+    expect(await second.job('v1', 'resume')).toEqual({ ok: true, value: null });
+    expect(seen).toEqual(['v1', 'v1']);
+    expect(media.contexts.map((c) => c.extras)).toEqual([null, null]);
+  });
+
+  it('a throw of ExtrasError from the handed function fails the job in the queue it built, with no engine start', () => {
+    const { life, media } = lifecycleWith(() => {
+      throw new ExtrasError('the sign-in sent with this link was not kept; send it again from the browser');
+    });
+    const queue = life.createQueue(fakeDaemon(), true);
+    expect(queue.snapshot().jobs[0]).toMatchObject({
+      state: 'failed',
+      reason: 'the sign-in sent with this link was not kept; send it again from the browser',
+      attempts: 0,
+    });
+    expect(media.contexts).toEqual([]);
+    expect(calls).toEqual([]);
   });
 });

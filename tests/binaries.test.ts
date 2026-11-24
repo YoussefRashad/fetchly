@@ -155,6 +155,15 @@ describe('Binaries', () => {
     }
   });
 
+  // A3 (plan 3.3, spawn rule): the header-carrying starts run `exe.command` unchanged, so the path must name the program file.
+  it('names the yt-dlp and aria2c programs with the .exe ending, inside the bin folder', () => {
+    const bins = make();
+    expect(bins.path('yt-dlp')).toBe(join(binDir, 'yt-dlp.exe'));
+    expect(bins.path('aria2c')).toBe(join(binDir, 'aria2c.exe'));
+    expect(bins.path('yt-dlp').endsWith('.exe')).toBe(true);
+    expect(bins.path('aria2c').endsWith('.exe')).toBe(true);
+  });
+
   it('installs all three, verified, leaving nothing else behind', async () => {
     const progress: [BinName, number][] = [];
     await make().ensureAll((name, pct) => progress.push([name, pct]));

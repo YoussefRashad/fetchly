@@ -1,7 +1,9 @@
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { readdirSync, rmSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { Job } from '../../shared/types';
+import { killTree } from '../killTree';
+import type { ProbeHeaders } from '../probe';
 import { downloadArgs, heightProbeArgs } from '../ytdlp/args';
 import { classifyError, parseLine, parseProbe } from '../ytdlp/parse';
 import type { Engine, EngineEvent, EngineListener, StartContext } from './engine';
@@ -68,12 +70,13 @@ const byLowerCase = (a: string, b: string): number => {
   return x < y ? -1 : x > y ? 1 : 0;
 };
 
-function killTree(child: ChildProcess): void {
-  if (child.pid === undefined) return;
-  // yt-dlp starts ffmpeg; /T takes the children down with it.
-  execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true }, (err) => {
-    if (err) child.kill();
-  });
+/**
+ * The two headers of a start. Only `referer` and `userAgent` are read: A3's engines never touch `cookies`.
+ * headerArgs checks each value again and drops one that is not valid.
+ */
+function headersOf(ctx: StartContext): ProbeHeaders | null {
+  const extras = ctx.extras;
+  return extras === null ? null : { referer: extras.referer, userAgent: extras.userAgent };
 }
 
 /** The height a height check reports: a number, null for none, or 'unreadable'. */
@@ -191,8 +194,10 @@ export class MediaEngine implements Engine {
     }
   }
 
+  /** Starts yt-dlp. It carries header values on its command line, so no shell ever reads that line (plan 3.3). */
   private spawnYtdlp(args: string[]): ChildProcess {
     return spawn(this.ytdlp.command, [...this.ytdlp.prefixArgs, ...args], {
+      shell: false,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       // Paths and titles must come back as UTF-8, whatever the console code page is.
@@ -210,7 +215,7 @@ export class MediaEngine implements Engine {
 
   /** Reads the real height (yt-dlp -J), then downloads. Every failure ends the job without a download. */
   private checkHeight(job: MediaJob, ctx: StartContext, entry: Running, release: (ev: EngineEvent | null) => void): void {
-    const child = this.spawnYtdlp(heightProbeArgs(job.url));
+    const child = this.spawnYtdlp(heightProbeArgs(job.url, headersOf(ctx)));
     entry.child = child;
 
     const chunks: Buffer[] = [];
@@ -294,6 +299,7 @@ export class MediaEngine implements Engine {
         ffmpegPath: this.ffmpegPath,
         rateLimitBytes: ctx.rateLimitBytes,
         sourceHeight,
+        headers: headersOf(ctx),
       }),
     );
     entry.child = child;

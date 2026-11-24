@@ -10,10 +10,33 @@ export type EngineEvent = { jobId: string } & (
   | { type: 'probed'; sourceHeight: number }
 );
 
+/** A sign-in held for one run. A5 defines it; in A3 no value of it exists, so `cookies` is always null. */
+export type CookieSource = never;
+
+/**
+ * What one run of a job sends besides its link. `StartContext.extras: null` and an object whose three values are all
+ * null mean the same. A3's engines read `referer` and `userAgent` only, and never `cookies`.
+ */
+export interface RunExtras {
+  referer: string | null;
+  userAgent: string | null;
+  cookies: CookieSource | null;
+}
+
+/** Thrown by `QueueDeps.extrasFor` when a job cannot start: `reason` is shown to the user as is. */
+export class ExtrasError extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+    this.name = 'ExtrasError';
+  }
+}
+
 export interface StartContext {
   settings: Settings;
   /** bytes per second for this one job, null = unlimited */
   rateLimitBytes: number | null;
+  /** The headers (and, from A5, the sign-in) of this one start; null = none. */
+  extras: RunExtras | null;
 }
 
 export type EngineListener = (ev: EngineEvent) => void;

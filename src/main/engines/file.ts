@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import type { Job } from '../../shared/types';
+import { sendableHeaders } from '../ytdlp/args';
 import type { Engine, EngineEvent, EngineListener, StartContext } from './engine';
 
 export interface Aria2Rpc {
@@ -133,8 +134,14 @@ export class FileEngine implements Engine {
     };
     this.tracked.set(jobId, entry);
 
+    const options: Record<string, string> = { dir: job.dir, out: entry.fileName, 'max-download-limit': String(ctx.rateLimitBytes ?? 0) };
+    // Only the keys `referer` and `user-agent`, each when its value is sendable; never `header`, and never the cookies.
+    const headers = sendableHeaders(ctx.extras);
+    if (headers.referer !== null) options['referer'] = headers.referer;
+    if (headers.userAgent !== null) options['user-agent'] = headers.userAgent;
+
     entry.added = entry.rpc
-      .call('aria2.addUri', [[job.url], { dir: job.dir, out: entry.fileName, 'max-download-limit': String(ctx.rateLimitBytes ?? 0) }])
+      .call('aria2.addUri', [[job.url], options])
       .then(
         (gid) => {
           if (entry.released) return;
