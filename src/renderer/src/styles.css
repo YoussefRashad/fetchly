@@ -1,19 +1,25 @@
 :root {
   color-scheme: light dark;
-  --bg: #f6f7f9;
-  --panel: #ffffff;
-  --text: #1c2026;
-  --muted: #5c667a;
-  --line: #e1e4ea;
-  /* The border of text fields and selects only: 3:1 against the panel. */
-  --field: #858e9d;
-  --accent: #1f6feb;
-  --accent-text: #ffffff;
-  --ok: #1a7f37;
-  --bad: #c62828;
-  --warn: #b26a00;
-  --bar: #e4e7ec;
-  font: 14px/1.45 'Segoe UI', Tahoma, system-ui, sans-serif;
+  --bg: #EDF0F4;
+  --chrome: #E3E8EE;
+  --surface: #FFFFFF;
+  --ink: #14202C;
+  --muted: #566375;
+  /* Decoration only (D5): never the only boundary of a control. */
+  --line: #D3DAE3;
+  /* Required boundaries: fields and outline buttons, 3:1 against --bg and --surface. Never on --chrome. */
+  --field: #7D8898;
+  --accent: #2346C4;
+  --on-accent: #FFFFFF;
+  --lane-v: #2346C4;
+  --lane-a: #0B7A6E;
+  --track: #E2E7EE;
+  --ok: #167447;
+  --bad: #B3261E;
+  --warn: #8F5600;
+  --hover: #E8ECF2;
+  --tint: #EEF2FF;
+  font: 14px/1.45 'IBM Plex Sans', 'IBM Plex Sans Arabic', 'Segoe UI', Tahoma, sans-serif;
 }
 
 /* Arabic script needs more size and line height to read as well as Latin at 14px. */
@@ -29,18 +35,23 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #16181d;
-    --panel: #1f2229;
-    --text: #e6e8ec;
-    --muted: #98a2b3;
-    --line: #2e323b;
-    --field: #697586;
-    --accent: #4c8dff;
-    --accent-text: #0b1220;
-    --ok: #4ac26b;
-    --bad: #ff6b6b;
-    --warn: #f0b429;
-    --bar: #2e323b;
+    --bg: #0F151C;
+    --chrome: #0B1016;
+    --surface: #161F29;
+    --ink: #E3E9F0;
+    --muted: #95A3B5;
+    --line: #26323F;
+    --field: #647387;
+    --accent: #8AA4FF;
+    --on-accent: #0B1530;
+    --lane-v: #8AA4FF;
+    --lane-a: #3CC4B2;
+    --track: #243040;
+    --ok: #4CC98A;
+    --bad: #FF7B72;
+    --warn: #E8B04B;
+    --hover: #1E2935;
+    --tint: #1A2540;
   }
 }
 
@@ -57,7 +68,16 @@ body,
 
 body {
   background: var(--bg);
-  color: var(--text);
+  color: var(--ink);
+}
+
+/* Only 400, 500 and 600 are bundled, so nothing asks for 700. */
+strong,
+b,
+h1,
+h2,
+h3 {
+  font-weight: 600;
 }
 
 button,
@@ -67,11 +87,12 @@ select {
   color: inherit;
 }
 
+/* An outline button's boundary is --field (D5: 3:1), not the decorative --line. */
 button {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 5px 10px;
+  background: var(--surface);
+  border: 1px solid var(--field);
+  border-radius: 8px;
+  padding: 5px 12px;
   cursor: pointer;
 }
 
@@ -87,18 +108,22 @@ button:disabled {
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--accent-text);
+  color: var(--on-accent);
   font-weight: 600;
 }
 
 input[type='text'],
 input[type='number'],
 select {
-  background: var(--panel);
+  background: var(--surface);
   border: 1px solid var(--field);
-  border-radius: 6px;
-  padding: 6px 8px;
+  border-radius: 8px;
+  padding: 6px 10px;
   min-width: 0;
+}
+
+input[type='checkbox'] {
+  accent-color: var(--accent);
 }
 
 /* A left-to-right field (link, path, codes, numbers) keeps an Arabic placeholder on the right. */
@@ -111,6 +136,30 @@ select {
   outline-offset: 1px;
 }
 
+/* The base class for a metric: digits keep their widths as they change. */
+.metric {
+  font-variant-numeric: tabular-nums;
+}
+
+/* An icon is one stroke-only svg (components/Icon.tsx). */
+.icon {
+  display: block;
+  flex: none;
+}
+
+/* Only the icons that point along the reading direction flip, and the icon flips itself (not its button). */
+[dir='rtl'] .icon-mirror {
+  transform: scaleX(-1);
+}
+
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  min-width: 30px;
+  min-height: 28px;
+  padding: 2px 6px;
+}
+
 .app {
   display: flex;
   flex-direction: column;
@@ -119,7 +168,7 @@ select {
 
 .urlbar {
   padding: 12px 14px 8px;
-  background: var(--panel);
+  background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
 
@@ -156,8 +205,8 @@ small {
 }
 
 .filters button.active {
-  background: var(--panel);
-  border-color: var(--line);
+  background: var(--surface);
+  border-color: var(--field);
   font-weight: 600;
 }
 
@@ -174,7 +223,7 @@ small {
   align-items: center;
   margin: 8px 14px 0;
   padding: 8px 10px;
-  background: var(--panel);
+  background: var(--surface);
   border: 1px solid var(--bad);
   border-radius: 6px;
 }
@@ -211,7 +260,7 @@ ul {
 }
 
 .jobs > li {
-  background: var(--panel);
+  background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 8px;
   margin-bottom: 6px;
@@ -323,11 +372,6 @@ ul {
   padding: 0 4px;
 }
 
-/* Only the collapsed arrow points along the text; the open one points down in both directions. */
-[dir='rtl'] .twisty[aria-expanded='false'] {
-  transform: scaleX(-1);
-}
-
 .group ul .job {
   border-top: 1px solid var(--line);
   padding-inline-start: 22px;
@@ -372,7 +416,7 @@ ul {
 }
 
 .job-size .size-done {
-  color: var(--text);
+  color: var(--ink);
   font-weight: 600;
 }
 
@@ -394,9 +438,14 @@ ul {
   padding: 2px 8px;
 }
 
+/* Over `.job-actions button` (0,1,1): an icon button is the same 30px in a row and outside one. */
+.job-actions .icon-btn {
+  padding: 2px 6px;
+}
+
 .bar {
   height: 3px;
-  background: var(--bar);
+  background: var(--track);
 }
 
 .bar .fill {
@@ -429,7 +478,7 @@ ul {
 }
 
 .dialog {
-  background: var(--panel);
+  background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 18px;
@@ -516,6 +565,11 @@ ul {
   color: var(--muted);
 }
 
+/* No italic face is bundled, so an unavailable entry's reason stays upright and only muted. */
+.entries em {
+  font-style: normal;
+}
+
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
@@ -546,10 +600,16 @@ ul {
 
 .install .pct {
   color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
+/* The only reduced-motion block (D4): every element's static style is already its readable final state. */
 @media (prefers-reduced-motion: reduce) {
-  .bar .fill {
-    transition: none;
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
   }
 }

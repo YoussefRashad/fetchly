@@ -20,6 +20,10 @@ export default defineConfig({
   renderer: {
     root: resolve(__dirname, 'src/renderer'),
     plugins: [react()],
-    build: { rollupOptions: { input: { index: resolve(__dirname, 'src/renderer/index.html') } } },
+    build: {
+      // Every asset (the bundled fonts) is its own hashed file; nothing is inlined as a data: URI.
+      assetsInlineLimit: 0,
+      rollupOptions: { input: { index: resolve(__dirname, 'src/renderer/index.html') } },
+    },
   },
 });

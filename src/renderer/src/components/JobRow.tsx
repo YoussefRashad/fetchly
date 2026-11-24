@@ -1,15 +1,17 @@
 import { Fragment } from 'react';
 import type { Job, JobVerb } from '../../../shared/types';
 import { addedText, addedTitle, allowedVerbs, etaText, percent, qualityLabel, sizeParts, speedText, statusParts, statusText } from '../format';
+import type { IconName } from '../model/icons';
 import { S } from '../strings';
+import { Icon } from './Icon';
 
-const ICONS: Record<JobVerb, string> = {
-  pause: '❚❚',
-  resume: '▶',
-  cancel: '✕',
-  retry: '↻',
-  remove: '✕',
-  removeWithFile: '🗑',
+const ICONS: Record<JobVerb, IconName> = {
+  pause: 'pause',
+  resume: 'play',
+  cancel: 'close',
+  retry: 'retry',
+  remove: 'close',
+  removeWithFile: 'trash',
 };
 
 interface Props {
@@ -79,12 +81,12 @@ export function JobRow({ job, onError }: Props) {
               {S.openFile}
             </button>
           )}
-          <button type="button" onClick={() => void open('folder')} title={S.openFolder} aria-label={S.openFolder}>
-            📁
+          <button type="button" className="icon-btn" onClick={() => void open('folder')} title={S.openFolder} aria-label={S.openFolder}>
+            <Icon name="folder" />
           </button>
           {allowedVerbs(job).map((verb) => (
-            <button key={verb} type="button" onClick={() => void act(verb)} title={S.verbs[verb]} aria-label={S.verbs[verb]}>
-              {ICONS[verb]}
+            <button key={verb} type="button" className="icon-btn" onClick={() => void act(verb)} title={S.verbs[verb]} aria-label={S.verbs[verb]}>
+              <Icon name={ICONS[verb]} />
             </button>
           ))}
         </span>

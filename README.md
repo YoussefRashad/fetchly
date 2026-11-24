@@ -244,3 +244,7 @@ Phase 1, the desktop app, is done. Planned next:
 [MIT](LICENSE). yt-dlp, ffmpeg and aria2 are separate programs under their
 own licenses; Fetchly downloads them from their official releases and does
 not bundle them.
+
+The window's typefaces, IBM Plex Sans and IBM Plex Sans Arabic (© IBM Corp.),
+are bundled at build time from the `@fontsource` packages under the SIL Open
+Font License 1.1.

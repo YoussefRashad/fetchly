@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ProbeResult } from '../../../shared/types';
 import { S } from '../strings';
+import { Icon } from './Icon';
 
 interface Props {
   onProbed(url: string, probe: ProbeResult): void;
@@ -44,8 +45,8 @@ export function UrlBar({ onProbed, onOpenSettings }: Props) {
         <button type="submit" className="primary" disabled={busy || url.trim() === ''}>
           {busy ? S.checking : S.add}
         </button>
-        <button type="button" onClick={onOpenSettings} aria-label={S.settings} title={S.settings}>
-          ⚙
+        <button type="button" className="icon-btn" onClick={onOpenSettings} aria-label={S.settings} title={S.settings}>
+          <Icon name="gear" />
         </button>
       </form>
       {error && (

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { Group, GroupVerb, Job } from '../../../shared/types';
 import { addedText, addedTitle, formatSpeed, groupSummary } from '../format';
 import { S } from '../strings';
+import { Icon } from './Icon';
 import { JobRow } from './JobRow';
 
 interface Props {
@@ -32,7 +33,7 @@ export function GroupRow({ group, members, visible, onError }: Props) {
     <li className="group">
       <div className="group-head">
         <button type="button" className="twisty" onClick={() => setOpen(!open)} aria-expanded={open} aria-label={group.title}>
-          {open ? '▾' : '▸'}
+          {open ? <Icon name="chevronDown" /> : <Icon name="chevronEnd" />}
         </button>
         <span className="job-name" title={group.title}>
           <bdi dir="auto" className="job-name-text">
@@ -51,22 +52,23 @@ export function GroupRow({ group, members, visible, onError }: Props) {
         </span>
         <span className="job-actions">
           {canPause && (
-            <button type="button" onClick={() => void act('pause')} title={S.groupVerbs.pause} aria-label={S.groupVerbs.pause}>
-              ❚❚
+            <button type="button" className="icon-btn" onClick={() => void act('pause')} title={S.groupVerbs.pause} aria-label={S.groupVerbs.pause}>
+              <Icon name="pause" />
             </button>
           )}
           {canResume && (
-            <button type="button" onClick={() => void act('resume')} title={S.groupVerbs.resume} aria-label={S.groupVerbs.resume}>
-              ▶
+            <button type="button" className="icon-btn" onClick={() => void act('resume')} title={S.groupVerbs.resume} aria-label={S.groupVerbs.resume}>
+              <Icon name="play" />
             </button>
           )}
           <button
             type="button"
+            className="icon-btn"
             onClick={() => void act('cancel')}
             title={unfinished ? S.groupVerbs.cancel : S.verbs.remove}
             aria-label={unfinished ? S.groupVerbs.cancel : S.verbs.remove}
           >
-            ✕
+            <Icon name="close" />
           </button>
         </span>
       </div>

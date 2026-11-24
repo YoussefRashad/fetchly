@@ -3,6 +3,7 @@ import { dirOf, resolveLang } from '../../shared/i18n';
 import type { AppStatus, ProbeResult, Settings, Snapshot } from '../../shared/types';
 import { banners, type BannerAction } from './banners';
 import { AddDialog } from './components/AddDialog';
+import { Icon } from './components/Icon';
 import { InstallScreen } from './components/InstallScreen';
 import { JobList } from './components/JobList';
 import { SettingsDialog } from './components/SettingsDialog';
@@ -106,8 +107,8 @@ export function App() {
       {message && (
         <p className="banner" role="status">
           <span>{message}</span>
-          <button type="button" onClick={() => setMessage(null)} aria-label={S.close}>
-            ✕
+          <button type="button" className="icon-btn" onClick={() => setMessage(null)} aria-label={S.close}>
+            <Icon name="close" />
           </button>
         </p>
       )}
