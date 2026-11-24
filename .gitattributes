@@ -1,0 +1,2 @@
+# The extension manifest is checked as plain JSON with LF line ends (tests/extension/manifest.test.ts).
+extension/manifest.json text eol=lf

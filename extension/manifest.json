@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Fetchly",
+  "description": "Connects this browser to the Fetchly download manager on this PC.",
+  "version": "0.1.0",
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "permissions": [],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "incognito": "not_allowed"
+}

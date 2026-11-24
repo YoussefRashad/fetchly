@@ -181,7 +181,7 @@ Closing the window keeps downloads running; the app lives in the tray, and
 
 ## Browser connection
 
-For the browser extension (in progress), the app listens on `127.0.0.1` only,
+For the browser extension, the app listens on `127.0.0.1` only,
 on port 38917 by default. **Settings → Browser connection port** changes it to
 any port from 1024 to 65535. A browser is paired once: **Settings → Browser →
 Pair a browser** shows a one-time `<port>-<code>` string, valid for 5 minutes,
@@ -203,6 +203,41 @@ its own token; **Unpair** revokes one at once.
   says so in Settings, and retries every 30 s and at quit. Until a write
   succeeds, a restart shows the old list, so an unpaired browser can return.
 
+### The extension (Chrome and Edge)
+
+The extension is not in a web store; it is built and loaded unpacked:
+
+```powershell
+npm run build:ext
+```
+
+Then open `chrome://extensions` (or `edge://extensions`), turn on
+**Developer mode**, press **Load unpacked** and choose the `extension\dist`
+folder. Open the Fetchly icon's popup, type the pairing string from
+**Settings → Browser → Pair a browser**, and press **Pair**.
+
+- The extension asks for no permission except access to `http://127.0.0.1`.
+  It does not use the browser's extension storage: the pairing (the port and
+  the token) is kept in the extension's own IndexedDB, which web pages and
+  other extensions cannot open.
+- **Moving the `extension` folder, or changing the port in Fetchly, means
+  pairing again.** A moved folder is a new extension with an empty store; the
+  popup then says "Not paired". After a port change it says Fetchly is not
+  running, with a hint to pair again.
+- **Same-user limit:** the token sits in the browser profile, so any program
+  running as your Windows user can read it. That is not defended.
+- The popup follows the browser's language (Arabic or English); there is no
+  language switch.
+- A browser entry that no longer works (a moved folder, a removed extension)
+  stays in Fetchly's list until you remove it in **Settings → Browser**. When
+  a new pairing replaces an old one, the extension removes the old entry itself
+  after the first successful connection. The old entry may remain if that check
+  or the removal fails, if the browser stops the extension first, or if saving
+  the pairing failed; remove it the same way.
+- If the popup keeps saying "Another operation is running" (بالعربي: «عملية أخرى قيد التنفيذ»),
+  an earlier step is stuck. Turn the extension off and on in the
+  browser's extensions page, then open the popup again.
+
 ## Develop
 
 ```powershell
@@ -217,10 +252,14 @@ npm run lint
 npm test
 ```
 
+```powershell
+npm run build:ext
+```
+
 The tests use no external network and no real tools; some start a server on
-127.0.0.1 and talk to it. `tests/fakes` holds the yt-dlp and aria2 stand-ins.
-CI runs typecheck, lint, the tests and a build on Windows for every push and
-pull request.
+127.0.0.1 and talk to it. `tests/fakes` holds the yt-dlp, aria2 and browser
+stand-ins. CI runs typecheck, lint, the tests, the app build and the
+extension build on Windows for every push and pull request.
 
 `npm run e2e:real -- 2 13` (or `all`) drives the built app (`npm run build` first) through the
 manual checklist with Playwright, on a scratch profile in `.e2e-real/`. It is opt-in, uses the
@@ -246,6 +285,7 @@ src/main/fileSafety.ts   Mark-of-the-Web and runnable-file checks
 src/main/ipc.ts          what the window may ask for
 src/preload/             the bridge exposed as window.fetchly
 src/renderer/            the window (React)
+extension/               the Chrome/Edge extension (MV3): popup and service worker
 tests/                   Vitest specs and the fake tools
 scripts/app-icon.mjs     draws the exe icon for the portable build
 electron-builder.yml     packager config for npm run dist:portable

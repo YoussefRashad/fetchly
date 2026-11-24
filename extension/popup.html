@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Fetchly</title>
+    <link rel="stylesheet" href="./popup.css" />
+    <script type="module" src="./src/popup.ts"></script>
+  </head>
+  <body>
+    <main>
+      <h1 id="title"></h1>
+      <p id="hint" hidden></p>
+      <p id="version-row" hidden><span id="version-label"></span> <span id="version" dir="ltr"></span></p>
+      <form id="pair-form" hidden>
+        <label for="code" id="code-label"></label>
+        <input id="code" name="code" type="text" maxlength="64" dir="ltr" autocomplete="off" spellcheck="false" />
+        <label for="name" id="name-label"></label>
+        <input id="name" name="name" type="text" maxlength="40" autocomplete="off" />
+        <button id="pair" type="submit"></button>
+      </form>
+      <div class="actions">
+        <button id="check-again" type="button" hidden></button>
+        <button id="pair-again" type="button" hidden></button>
+        <button id="unpair" type="button" hidden></button>
+      </div>
+    </main>
+  </body>
+</html>
