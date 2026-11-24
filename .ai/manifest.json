@@ -2,12 +2,12 @@
   "schema": 3,
   "skill": "project-setup",
   "skillVersion": "3.2.0",
-  "mode": "fresh",
+  "mode": "update",
   "agents": [
     "claude",
     "codex"
   ],
-  "sourceCommit": "0beea0a",
+  "sourceCommit": "6296232",
   "files": {
     ".ai/agents/docs-sync.md": {
       "ownership": "full",
@@ -176,11 +176,11 @@
     "AGENTS.md": {
       "ownership": "blocks",
       "blocks": {
-        "overview": "2237b05938db49a71f58f562df92c7765f496d05af8affe6a86f9384e032673b",
-        "critical-rules": "428871ea70f2f8a39962247deb6445df1e97f4af8f459212d444f5b4ea3654b9",
-        "commands": "0512ca80e34938b5d09ae33e3c5046a12cff178ad142c11c8712346112797814",
+        "overview": "a8fb1bcc2db6217f0620144f245965dd0ad3007d27a0df036e4b936275a23c9b",
+        "critical-rules": "120455ad862f5d5b7416d84097a1f15d2e48b4890f3a8bafddd4533f94ee9023",
+        "commands": "37214183c6f43bf58a82189fcce06a941079bc68103202a41e8e42536e0cba29",
         "navigation": "fc9078d56105283a3951c77593b777cebd07b5146f503ce7ee00c7a64a39abf3",
-        "local-instructions": "732c76045727398379ceae182556a7312bbaae0cf458e2da35a94bc43e7ac16c",
+        "local-instructions": "405227b7ee15ff93ff2f919cbc0a7ad7eb3d4bc91657434b6f9f8a577d53372b",
         "agents": "ff975ee241510f6311b3524d8eb71977b4e149bb1f3fc1505d983a28658e0219"
       }
     },
@@ -211,6 +211,16 @@
     "docs/persistence.md": {
       "ownership": "merged"
     },
+    "extension/AGENTS.md": {
+      "ownership": "blocks",
+      "blocks": {
+        "local": "75b7ad91526cde584611f9226b549b047e36580430798725255c6130340ca93a"
+      }
+    },
+    "extension/CLAUDE.md": {
+      "ownership": "full",
+      "sha256": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+    },
     "src/main/jobs/AGENTS.md": {
       "ownership": "blocks",
       "blocks": {
@@ -224,7 +234,7 @@
     "src/main/server/AGENTS.md": {
       "ownership": "blocks",
       "blocks": {
-        "local": "7021914e9b228ea76fcb707a9da1a5ee57c91753284f9887c5b80c9a9d3d9532"
+        "local": "365b38363c2360965f5678e7ccd3082f010436225d2d3e5d77c90eee3b36e0b2"
       }
     },
     "src/main/server/CLAUDE.md": {

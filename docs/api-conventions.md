@@ -37,6 +37,30 @@ Adding a route: register it in `routes.ts` (paths are unique; `register` throws 
 check with exact keys, add any new error token to `ErrorToken`, update this file and `tests/server/`. This is a
 sensitive change (`src/main/server/AGENTS.md`).
 
+### The extension's side (`extension/src/lib/client.ts`)
+
+Rules: `extension/AGENTS.md`. Design: the frozen `docs/plans/2026-11-23-phase2-a2-*.md`.
+
+- Pairing: the popup's code is normalized in the service worker before anything is sent
+  (`normalizePairingString`, `lib/pairingInput.ts`: trimmed, ASCII letters upper-cased, and after the first `-`
+  the letter O read as 0 and I or L as 1), then parsed with the shared `parsePairingString`
+  (`src/shared/protocol.ts`). `pair(port, code, label)` calls `/v1/pair` once; the service worker stores the record
+  (`lib/messages.ts`).
+- Every later call (`call(path, body)`): read the record, send `/v1/hello` with a fresh 32-byte nonce, verify the
+  proof with WebCrypto, then send at most one request with the bearer token. A proof older than 5 s on either
+  clock, or one checked after a wall clock that went backwards, is not used (`stale_proof`); the request is not
+  made.
+- Each fetch: `credentials: 'omit'`, `cache: 'no-store'`, `redirect: 'manual'`, `referrerPolicy: 'no-referrer'`,
+  aborted after 5 s (headers and body together). At most 64 KiB of a response is read; more counts as not JSON.
+- A failed exchange is a `CallResult` kind, not a throw (only a programming error throws a fixed text: a path that
+  may not be requested, a body that is not JSON, a port that is not a server port): `not_paired`,
+  `storage_blocked`, `app_not_running`, `wrong_program` (hello was not a valid proof), `unpaired` (hello answered
+  `unknown_pairing`), `stale_proof`, `too_large_local`, `wrong_shape` or `refused` with the status and error token.
+- Of the client's methods only `call` deletes the stored record, and only on `401 bad_token` or `403 bad_origin`
+  after a right proof. Outside the client, Unpair removes it (`messages.ts`) and a read drops a record of another
+  shape (`store.ts`).
+- No retry (`client.ts`, E8e): the popup shows the state and the user presses Check again.
+
 ## IPC (window to main)
 
 - Channel names: `fetchly:<method>`, one per `FetchlyApi` method (`src/shared/types.ts`). Push channels:

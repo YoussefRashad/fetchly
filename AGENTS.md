@@ -121,6 +121,7 @@ Before changing files under these paths, read the listed file first (tools do no
 
 - `src/main/server/` and `src/shared/protocol.ts`: read `src/main/server/AGENTS.md`.
 - `src/main/jobs/` and `src/main/atomicFile.ts`: read `src/main/jobs/AGENTS.md`.
+- `extension/`: read `extension/AGENTS.md`.
 <!-- project-setup:end id=local-instructions -->
 
 <!-- project-setup:begin id=agents -->

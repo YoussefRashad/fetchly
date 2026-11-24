@@ -14,9 +14,6 @@
 ## Missing Information
 <!-- Could not be inferred from code. -->
 
-- Extension: `extension/` is on `main` (A2) and listed in AGENTS.md, the gates and the sensitive areas. Still to
-  do: re-run project-setup (update) to add an `extension/AGENTS.md` + `extension/CLAUDE.md` pair (rules for
-  `extension/src/**`) and document the extension's side of the protocol in `docs/api-conventions.md`.
 - `/v1/hello`: the server stores no nonces and checks no timestamp; the nonce is chosen by the client. Confirm this
   is intended (the proof binds the port and the client checks freshness) and record it in ADR-004 if so.
 - `docs/observability.md` was not generated: the app has no logger and one log line. Confirm that is the intended
@@ -33,9 +30,8 @@
 ## Inconsistencies
 <!-- Pattern / naming / config deviations. -->
 
-- `src/main/ipc.ts`: IPC error texts (`BAD_REQUEST`, `statusText`, `describe`) are English only. The renderer
-  translates job reasons through `S.reasons` but shows other `error` texts as they are (`App.tsx`), so an Arabic
-  user can see English errors. This conflicts with "every user-facing string has EN and AR".
+- `src/main/server/pairing.ts`: its refusal texts carry no error code; `ipc.ts` maps the two known ones by value
+  (`pairingRefusal`) and passes any other text on in English. Confirm no other refusal can reach the window.
 - `src/shared/protocol.ts`: error tokens `busy`, `not_ready`, `unknown_request`, `storage_unavailable` and
   `bad_site` are declared but not produced on `main` (planned Phase 2 routes).
 
@@ -53,5 +49,5 @@
 ## Cleanup
 <!-- Dead code, stale config, missing tests. -->
 
-- Two `project-setup` copies are visible to Claude Code on the maintainer's machine (a user copy 3.2.0 and a
-  claude.ai-synced 3.1.0). Keep one, so later runs cannot load the older copy.
+- Two `project-setup` copies may still be visible to Claude Code on the maintainer's machine (reported turned off
+  on 2026-11-24; confirm that a new session lists only 3.2.0).
