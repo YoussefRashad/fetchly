@@ -21,6 +21,11 @@ export interface MediaEngineOptions {
   stopTimeoutMs?: number;
   /** Ends a process tree. Default: taskkill /T /F, falling back to child.kill() when taskkill fails. */
   kill?: (child: ChildProcess) => void;
+  /**
+   * Bytes of height-check output that are read (default 64 MiB); output beyond it is discarded and the job
+   * downloads with no known height. A finite number of 0 or more; not validated (only specs set it).
+   */
+  probeOutputCap?: number;
 }
 
 interface Running {
@@ -35,7 +40,10 @@ interface Running {
 type MediaJob = Job & { baseName: string; quality: NonNullable<Job['quality']> };
 
 const STDERR_CAP = 64 * 1024;
-/** The same cap as the link probe: yt-dlp JSON beyond it is not read. */
+/**
+ * The same cap as the link probe: height-check output beyond it is not read. Over it the height check is ended and
+ * the job downloads with no known height (the height only chooses the container). Default of `probeOutputCap`.
+ */
 const PROBE_OUTPUT_CAP = 64 * 1024 * 1024;
 const STOP_UNCONFIRMED = 'could not confirm that the download stopped';
 
@@ -96,6 +104,7 @@ export class MediaEngine implements Engine {
   private readonly probeTimeoutMs: number;
   private readonly stopTimeoutMs: number;
   private readonly kill: (child: ChildProcess) => void;
+  private readonly probeOutputCap: number;
 
   constructor(
     private readonly ytdlp: Exe,
@@ -105,6 +114,7 @@ export class MediaEngine implements Engine {
     this.probeTimeoutMs = opts.probeTimeoutMs ?? 30000;
     this.stopTimeoutMs = opts.stopTimeoutMs ?? 10000;
     this.kill = opts.kill ?? killTree;
+    this.probeOutputCap = opts.probeOutputCap ?? PROBE_OUTPUT_CAP;
   }
 
   on(listener: EngineListener): void {
@@ -114,7 +124,8 @@ export class MediaEngine implements Engine {
   /**
    * Starts the job unless the engine already owns it. A Best job (not "always mp4") with no
    * known height and no data yet first runs a height check; a height found is reported as
-   * `probed` and decides the container.
+   * `probed` and decides the container. Height-check output over the output cap is not read:
+   * the check is ended and the job downloads with no known height (no `probed`, no error).
    */
   start(job: Job, ctx: StartContext): void {
     if (job.baseName === null || job.quality === null) {
@@ -213,7 +224,12 @@ export class MediaEngine implements Engine {
     }
   }
 
-  /** Reads the real height (yt-dlp -J), then downloads. Every failure ends the job without a download. */
+  /**
+   * Reads the real height (yt-dlp -J), then downloads. A pending stop wins: no event and no download.
+   * Output over the cap is discarded, the check is ended once, and when it has ended the job downloads with
+   * no known height, whatever the time limit, the exit code or a signal say. Every other failure ends the
+   * job without a download.
+   */
   private checkHeight(job: MediaJob, ctx: StartContext, entry: Running, release: (ev: EngineEvent | null) => void): void {
     const child = this.spawnYtdlp(heightProbeArgs(job.url, headersOf(ctx)));
     entry.child = child;
@@ -223,11 +239,15 @@ export class MediaEngine implements Engine {
     let overCap = false;
     let stderr = '';
     child.stdout?.on('data', (chunk: Buffer) => {
+      // Over the cap the stream keeps flowing (a child blocked on its write would never end); chunks are dropped.
       if (overCap) return;
       size += chunk.length;
-      if (size > PROBE_OUTPUT_CAP) {
+      if (size > this.probeOutputCap) {
         overCap = true;
         chunks.length = 0;
+        // The download starts on this child's 'close', so one job never has two processes. The time limit stays
+        // armed: if this kill does not end the tree, the timer kills again.
+        this.killChild(child);
         return;
       }
       chunks.push(chunk);
@@ -261,11 +281,13 @@ export class MediaEngine implements Engine {
       settle(() => {
         // A stop that is pending wins: no event and no download.
         if (entry.stopping !== null) return release(null);
+        // Over the cap: the height is only a container hint, so the job downloads without it.
+        if (overCap) return this.download(job, ctx, entry, release, null);
         if (timedOut) {
           return release({ jobId: job.id, type: 'error', outcome: 'failed', reason: 'timed out reading the link', retryable: true });
         }
         if (code !== 0) return release({ jobId: job.id, type: 'error', ...classifyError(stderr) });
-        const height = overCap ? 'unreadable' : readHeight(Buffer.concat(chunks).toString('utf8'));
+        const height = readHeight(Buffer.concat(chunks).toString('utf8'));
         if (height === 'unreadable') {
           return release({
             jobId: job.id,

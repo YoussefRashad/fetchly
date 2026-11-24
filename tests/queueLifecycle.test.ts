@@ -13,7 +13,8 @@ import { makeJob, makeSettings } from './helpers';
 
 const COULD_NOT_START = 'The download tools could not be started: ';
 const READY: EngineStatus = { state: 'ready' };
-const failed = (message: string): EngineStatus => ({ state: 'error', message: `${COULD_NOT_START}${message}` });
+/** The start failure of the host: the English message of today, the code toolsStartFailed, and the raw message as its detail. */
+const failed = (message: string): EngineStatus => ({ state: 'error', message: `${COULD_NOT_START}${message}`, code: 'toolsStartFailed', detail: message });
 
 /** Lets every promise that can settle without a timer settle. */
 const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));

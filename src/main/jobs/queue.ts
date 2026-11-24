@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readdirSync, rmSync } from 'node:fs';
 import { extname, join, win32 } from 'node:path';
+import { ERROR_TEXT, SAVE_FAILED_PREFIX } from '../../shared/errors';
 import type { AddRequest, Group, GroupVerb, Job, JobVerb, Result, Settings, Snapshot } from '../../shared/types';
 import { ExtrasError, type Engine, type EngineEvent, type RunExtras } from '../engines/engine';
 import { dirKey, freeName, itemBaseName, nameConflicts, sanitizeName } from '../naming';
@@ -15,16 +16,12 @@ const MAX_ATTEMPTS = RETRY_DELAYS_MS.length;
 const NOTIFY_EVERY_MS = 250;
 const SAVE_PROGRESS_EVERY_MS = 5000;
 
-const PAUSE_NOT_CONFIRMED = 'Could not confirm that the download stopped. It is still listed as running; try again.';
-const CANCEL_NOT_CONFIRMED = 'Could not confirm that the download stopped, so nothing was deleted. It is still in the list; try again.';
-const CLOSING = 'Fetchly is closing';
 /** A start whose extras could not be made for a reason that is not an ExtrasError; the error's own text is never shown. */
 const COULD_NOT_START = 'could not start the download';
-const CUT_OFF =
-  'This download was cut off and Fetchly could not check that its old process is gone. End yt-dlp, ffmpeg and aria2c in Task Manager, then choose "They are gone" in the banner, or restart Fetchly.';
 
 const ok = (): Result<null> => ({ ok: true, value: null });
-const fail = (error: string): Result<null> => ({ ok: false, error });
+/** A failure with a fixed code: its English text and the code. */
+const fail = (code: 'pauseNotConfirmed' | 'cancelNotConfirmed' | 'closing' | 'cutOff'): Result<null> => ({ ok: false, error: ERROR_TEXT[code], code });
 const noop = (): void => undefined;
 
 /** A finite, non-negative number, else null. */
@@ -292,13 +289,13 @@ export class Queue {
 
   /** Runs the verb after the job's earlier verbs; ok when it did its work or had nothing to do. */
   job(id: string, verb: JobVerb): Promise<Result<null>> {
-    if (this.closed) return Promise.resolve(fail(CLOSING));
+    if (this.closed) return Promise.resolve(fail('closing'));
     return this.enqueue(id, () => this.runVerb(id, verb, false));
   }
 
   /** One verb per member, each on its member's chain; the first error, else ok. */
   async group(id: string, verb: GroupVerb): Promise<Result<null>> {
-    if (this.closed) return fail(CLOSING);
+    if (this.closed) return fail('closing');
     const members = this.jobs.filter((j) => j.groupId === id).map((j) => j.id);
     const results = await Promise.all(members.map((m) => this.enqueue(m, () => this.runVerb(m, verb, true))));
     return results.find((r) => !r.ok) ?? ok();
@@ -341,7 +338,7 @@ export class Queue {
   private enqueue(id: string, run: () => Promise<Result<null>>): Promise<Result<null>> {
     const previous = this.chains.get(id) ?? Promise.resolve();
     // A verb still waiting when closing started does nothing.
-    const result = previous.then(() => (this.closed ? fail(CLOSING) : run()));
+    const result = previous.then(() => (this.closed ? fail('closing') : run()));
     const tail = result.then(noop, noop);
     this.chains.set(id, tail);
     void tail.then(() => {
@@ -379,7 +376,7 @@ export class Queue {
       try {
         await this.engineOf(job).stop(id);
       } catch {
-        return fail(PAUSE_NOT_CONFIRMED);
+        return fail('pauseNotConfirmed');
       }
     }
     this.waiting.delete(id);
@@ -392,7 +389,7 @@ export class Queue {
   private async resumeVerb(id: string, skipCutOff: boolean): Promise<Result<null>> {
     const job = this.find(id);
     if (!job || !canApply(job, 'resume')) return ok();
-    if (job.interrupted) return skipCutOff ? ok() : fail(CUT_OFF);
+    if (job.interrupted) return skipCutOff ? ok() : fail('cutOff');
     this.apply(id, { type: 'resume' });
     this.commit();
     return ok();
@@ -417,7 +414,7 @@ export class Queue {
       this.cancelling.delete(id);
       // The row stays; a queued job held back meanwhile may take a free slot again.
       if (this.find(id)?.state === 'queued') this.commit();
-      return fail(CANCEL_NOT_CONFIRMED);
+      return fail('cancelNotConfirmed');
     }
     this.cancelling.delete(id);
     this.waiting.delete(id);
@@ -437,7 +434,10 @@ export class Queue {
         // No force and no recursive: a folder in the file's place is refused and left intact.
         rmSync(join(job.dir, job.fileName));
       } catch (e) {
-        if ((e as NodeJS.ErrnoException | null)?.code !== 'ENOENT') return fail(`Could not delete the file: ${messageOf(e)}`);
+        if ((e as NodeJS.ErrnoException | null)?.code !== 'ENOENT') {
+          const detail = messageOf(e);
+          return { ok: false, error: ERROR_TEXT.deleteFailed(detail), code: 'deleteFailed', detail };
+        }
       }
     }
     this.remove(id);
@@ -730,7 +730,7 @@ export class Queue {
     try {
       this.store.saveSnapshot(this.snapshot());
     } catch (e) {
-      this.setSaveError(`could not save the download list: ${messageOf(e)}`);
+      this.setSaveError(`${SAVE_FAILED_PREFIX}${messageOf(e)}`);
       this.armSaveRetry();
       return;
     }

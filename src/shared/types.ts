@@ -1,3 +1,4 @@
+import type { ErrorCode } from './errors';
 import type { LanguageSetting, ThemeSetting } from './i18n';
 
 export type JobKind = 'media' | 'file';
@@ -141,7 +142,18 @@ export interface BinStatus {
   version: string | null;
 }
 
-export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
+/**
+ * Why something failed. `error` is the English text; `code` (src/shared/errors.ts) lets the window show it in the
+ * language in use, with `detail` the raw part (an OS or tool message) a detail code puts into its text.
+ */
+export interface ErrorInfo {
+  error: string;
+  code?: ErrorCode;
+  detail?: string;
+}
+
+/** `warning`: it worked, but something after it did not (setSettings only). */
+export type Result<T> = { ok: true; value: T; warning?: ErrorInfo } | ({ ok: false } & ErrorInfo);
 
 /**
  * State of the download tools (B17).
@@ -149,21 +161,24 @@ export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
  * starting: tools present, a start or restart is running (also the value before the first start).
  * ready: the queue exists and aria2 runs.
  * error: the start failed (no queue), or aria2 exited (the queue exists, file downloads
- * cannot run); Retry applies.
+ * cannot run); Retry applies. `message` is the English text; `code` and `detail` as in ErrorInfo.
  */
 export type EngineStatus =
   | { state: 'notInstalled' }
   | { state: 'starting' }
   | { state: 'ready' }
-  | { state: 'error'; message: string };
+  | { state: 'error'; message: string; code?: ErrorCode; detail?: string };
 
 /**
  * State of the local server the browser extension talks to.
  * listening: bound to 127.0.0.1 on `port` (the port the socket really has).
  * portBusy: `port` is taken by another program; nothing else was tried.
- * error: no listener, `message` says why.
+ * error: no listener, `message` says why (English); `code` translates it, `port` is the port a port code names.
  */
-export type ServerStatus = { state: 'listening'; port: number } | { state: 'portBusy'; port: number } | { state: 'error'; message: string };
+export type ServerStatus =
+  | { state: 'listening'; port: number }
+  | { state: 'portBusy'; port: number }
+  | { state: 'error'; message: string; code?: ErrorCode; port?: number };
 
 export interface AppStatus {
   engine: EngineStatus;

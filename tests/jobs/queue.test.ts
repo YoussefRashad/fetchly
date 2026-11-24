@@ -179,6 +179,11 @@ const CANCEL_NOT_CONFIRMED = 'Could not confirm that the download stopped, so no
 const CLOSING = 'Fetchly is closing';
 const CUT_OFF =
   'This download was cut off and Fetchly could not check that its old process is gone. End yt-dlp, ffmpeg and aria2c in Task Manager, then choose "They are gone" in the banner, or restart Fetchly.';
+/** What each failed verb answers (Task D, item 2): the English text of today and its code; none of these carries a detail. */
+const PAUSE_FAILED = { ok: false, error: PAUSE_NOT_CONFIRMED, code: 'pauseNotConfirmed' };
+const CANCEL_FAILED = { ok: false, error: CANCEL_NOT_CONFIRMED, code: 'cancelNotConfirmed' };
+const CLOSING_FAILED = { ok: false, error: CLOSING, code: 'closing' };
+const CUT_OFF_FAILED = { ok: false, error: CUT_OFF, code: 'cutOff' };
 /** The save error a listener is told about when the store throws `reason`. */
 const saveMessage = (reason: string): string => `could not save the download list: ${reason}`;
 /** SAVE_RETRY_MS as the plan states it (OQ2); one spec checks the exported constant against it. */
@@ -1757,7 +1762,7 @@ describe('a stop that is not confirmed (7.2)', () => {
   it('pause reports failure and keeps the slot when the stop is not confirmed', async () => {
     const { q, first } = twoJobs('media');
     media.stopFails.add(first);
-    expect(await q.job(first, 'pause')).toEqual({ ok: false, error: PAUSE_NOT_CONFIRMED });
+    expect(await q.job(first, 'pause')).toEqual(PAUSE_FAILED);
     expect(states(q)).toEqual(['probing', 'queued']);
     expect(media.started).toHaveLength(1);
   });
@@ -1765,7 +1770,7 @@ describe('a stop that is not confirmed (7.2)', () => {
   it('pause reports failure and keeps the slot when the stop of a file download is not confirmed', async () => {
     const { q, first } = twoJobs('file');
     file.stopFails.add(first);
-    expect(await q.job(first, 'pause')).toEqual({ ok: false, error: PAUSE_NOT_CONFIRMED });
+    expect(await q.job(first, 'pause')).toEqual(PAUSE_FAILED);
     expect(states(q)).toEqual(['probing', 'queued']);
     expect(file.started).toHaveLength(1);
   });
@@ -1801,7 +1806,7 @@ describe('a stop that is not confirmed (7.2)', () => {
   it('cancel keeps the row when the stop is not confirmed', async () => {
     const { q, first } = twoJobs('media');
     media.stopFails.add(first);
-    expect(await q.job(first, 'cancel')).toEqual({ ok: false, error: CANCEL_NOT_CONFIRMED });
+    expect(await q.job(first, 'cancel')).toEqual(CANCEL_FAILED);
     expect(media.discarded).toEqual([first]);
     expect(states(q)).toEqual(['probing', 'queued']); // the row stays and so does the slot
     expect(media.started).toHaveLength(1);
@@ -1810,7 +1815,7 @@ describe('a stop that is not confirmed (7.2)', () => {
   it('cancel keeps the row when the stop of a file download is not confirmed', async () => {
     const { q, first } = twoJobs('file');
     file.stopFails.add(first);
-    expect(await q.job(first, 'cancel')).toEqual({ ok: false, error: CANCEL_NOT_CONFIRMED });
+    expect(await q.job(first, 'cancel')).toEqual(CANCEL_FAILED);
     expect(file.discarded).toEqual([first]);
     expect(states(q)).toEqual(['probing', 'queued']);
     expect(file.started).toHaveLength(1);
@@ -1832,7 +1837,7 @@ describe('a stop that is not confirmed (7.2)', () => {
     q.add(playlist(3));
     const [a, b, c] = ids(q) as [string, string, string];
     media.stopFails.add(b);
-    expect(await q.group(groupAt(q).id, 'pause')).toEqual({ ok: false, error: PAUSE_NOT_CONFIRMED });
+    expect(await q.group(groupAt(q).id, 'pause')).toEqual(PAUSE_FAILED);
     expect(states(q)).toEqual(['paused', 'probing', 'paused']);
     expect([...media.stopped].sort()).toEqual([a, b, c].sort()); // every member was tried
   });
@@ -1841,7 +1846,7 @@ describe('a stop that is not confirmed (7.2)', () => {
     const q = build();
     q.add(playlist(2));
     for (const id of ids(q)) media.stopFails.add(id);
-    expect(await q.group(groupAt(q).id, 'pause')).toEqual({ ok: false, error: PAUSE_NOT_CONFIRMED });
+    expect(await q.group(groupAt(q).id, 'pause')).toEqual(PAUSE_FAILED);
     expect(states(q)).toEqual(['probing', 'probing']);
   });
 
@@ -1870,7 +1875,7 @@ describe('a stop that is not confirmed (7.2)', () => {
     const [a, b] = ids(q) as [string, string];
     const gid = groupAt(q).id;
     media.stopFails.add(b);
-    expect(await q.group(gid, 'cancel')).toEqual({ ok: false, error: CANCEL_NOT_CONFIRMED });
+    expect(await q.group(gid, 'cancel')).toEqual(CANCEL_FAILED);
     expect(media.discarded.sort()).toEqual([a, b].sort()); // every member was tried
     expect(ids(q)).toEqual([b]);
     expect(jobAt(q, 0).groupId).toBe(gid);
@@ -2786,8 +2791,8 @@ describe('shutdown (7.6)', () => {
       fire(5000);
       expect(media.started).toHaveLength(startsAtClose);
       expect(states(q)).toEqual(['paused', 'queued', 'paused']);
-      expect(await q.job(a, 'resume')).toEqual({ ok: false, error: CLOSING });
-      expect(await q.job(b, 'resume')).toEqual({ ok: false, error: CLOSING });
+      expect(await q.job(a, 'resume')).toEqual(CLOSING_FAILED);
+      expect(await q.job(b, 'resume')).toEqual(CLOSING_FAILED);
       expect(media.started).toHaveLength(startsAtClose);
     });
 
@@ -2836,8 +2841,8 @@ describe('shutdown (7.6)', () => {
       q.add(video('Second'));
       await q.shutdown();
       const before = q.snapshot();
-      expect(await q.job(jobAt(q, 0).id, verb)).toEqual({ ok: false, error: CLOSING });
-      expect(await q.job(jobAt(q, 1).id, verb)).toEqual({ ok: false, error: CLOSING });
+      expect(await q.job(jobAt(q, 0).id, verb)).toEqual(CLOSING_FAILED);
+      expect(await q.job(jobAt(q, 1).id, verb)).toEqual(CLOSING_FAILED);
       expect(q.snapshot()).toEqual(before);
       expect(media.discarded).toEqual([]);
     });
@@ -2848,7 +2853,7 @@ describe('shutdown (7.6)', () => {
       const gid = groupAt(q).id;
       await q.shutdown();
       const before = q.snapshot();
-      expect(await q.group(gid, verb)).toEqual({ ok: false, error: CLOSING });
+      expect(await q.group(gid, verb)).toEqual(CLOSING_FAILED);
       expect(q.snapshot()).toEqual(before);
       expect(media.discarded).toEqual([]);
     });
@@ -2888,7 +2893,7 @@ describe('shutdown (7.6)', () => {
     release();
     await shutting;
     expect(await pause).toEqual(OK); // the pause was already past its stop
-    expect(await resume).toEqual({ ok: false, error: CLOSING });
+    expect(await resume).toEqual(CLOSING_FAILED);
     expect(jobAt(q, 0).state).toBe('paused');
     expect(media.started).toHaveLength(1);
   });
@@ -2907,7 +2912,7 @@ describe('shutdown (7.6)', () => {
       release();
       await shutting;
       await pause;
-      expect(await waiting).toEqual({ ok: false, error: CLOSING });
+      expect(await waiting).toEqual(CLOSING_FAILED);
       expect(q.snapshot().jobs).toHaveLength(1);
       expect(jobAt(q, 0).state).toBe('paused');
       expect(media.discarded).toEqual([]);
@@ -2928,7 +2933,7 @@ describe('shutdown (7.6)', () => {
     release();
     await shutting;
     await Promise.all(pauses);
-    expect(await waiting).toEqual({ ok: false, error: CLOSING });
+    expect(await waiting).toEqual(CLOSING_FAILED);
     expect(q.snapshot().jobs).toHaveLength(2);
     expect(media.discarded).toEqual([]);
     expect(states(q)).toEqual(['paused', 'paused']);
@@ -3134,7 +3139,7 @@ describe('jobs cut off by a crash (7.7)', () => {
 
   it.each(KINDS)('refuses to resume a cut-off %s job when the check failed', async (kind) => {
     const q = build({}, seedOf([cutOff(kind, 'x')]), false);
-    expect(await q.job('x', 'resume')).toEqual({ ok: false, error: CUT_OFF });
+    expect(await q.job('x', 'resume')).toEqual(CUT_OFF_FAILED);
     expect(jobAt(q, 0)).toMatchObject({ state: 'paused', interrupted: true });
     expect((kind === 'media' ? media : file).started).toHaveLength(0);
     expect(saves.at(-1)?.jobs[0]).toMatchObject({ state: 'paused', interrupted: true }); // the saved list still says so
@@ -3689,7 +3694,8 @@ describe('deleting the file (7.9)', () => {
     const reason = refusal(target);
     expect(reason).not.toBe('');
     const result = await q.job(id, 'removeWithFile');
-    expect(result).toEqual({ ok: false, error: `Could not delete the file: ${reason}` });
+    // deleteFailed: the English text of today, the code, and the OS message as the detail.
+    expect(result).toEqual({ ok: false, error: `Could not delete the file: ${reason}`, code: 'deleteFailed', detail: reason });
     expect(result.ok === false && result.error.startsWith('Could not delete the file: ')).toBe(true);
     expect(q.snapshot().jobs.map((j) => [j.id, j.state])).toEqual([[id, 'done']]);
     expect(existsSync(join(target, 'inner.txt'))).toBe(true);

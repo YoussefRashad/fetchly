@@ -62,3 +62,16 @@ Fetchly toolbar icon.
 | 12 | After A3 (a content script exists): in a web page's DevTools console, in the content script's context, run `indexedDB.open('fetchly')` and look at the result. | The database there has no `kv` store: the page's origin cannot see the extension's record. |
 | 13 | Turn on "clear cookies and site data when you close all windows", restart the browser, and open the popup. | Note whether the pairing survives the restart. |
 | 14 | Row 16 of the A1 section: both browsers paired from the same `extension\dist` folder. | As in A1 row 16. |
+
+## D: housekeeping
+
+Errors now carry a code, so the Arabic window shows them in Arabic. Rows 1, 2 and 4
+need the window in Arabic (Settings → Language → العربية, then Save).
+
+| # | Do | Expected |
+| --- | --- | --- |
+| 1 | Paste `ftp://x` into the link bar and press **إضافة**. | The error under the bar is Arabic: "أدخل رابطًا يبدأ بـ http:// أو https://", each link reading left to right. |
+| 2 | In Settings, set the port to `80` and press **حفظ**. | The dialog's error line is Arabic: "المنفذ يجب أن يكون عددًا صحيحًا من 1024 إلى 65535". Nothing is saved. |
+| 3 | On a PC where the download tools are not installed yet, put `"language": "ar"` in `%APPDATA%\fetchly\settings.json`, start Fetchly, disconnect the network and press **تثبيت**. | The install error stays English (for example "could not download …") and reads left to right inside the Arabic screen. |
+| 4 | Run `netsh interface ipv4 show excludedportrange protocol=tcp`. Pick a listed range that is **not** marked `*` and holds a port of 1024 or more, and save one of its ports in Settings. Ranges marked `*` are administered exclusions; in the Windows run on 2026-11-23, port 50000 in such a range (50000-50059) allowed a loopback bind, while 50100 in an unmarked range returned EACCES. | The banner is Arabic: "لا يمكن استخدام المنفذ … على هذا الكمبيوتر؛ اختر منفذًا آخر من الإعدادات", with the port in Western digits. If no unmarked range holds such a port, mark this row spec-only (`tests/server/port.test.ts`, `tests/renderer/bannersServer.test.ts`). |
+| 5 | (spec-only) | The notice "Settings were saved, but the running downloads did not take them" (`tests/ipcPairing.test.ts`, `tests/renderer/errors.test.ts`) and the Best-quality download that falls back when the height check passes 64 MB (`tests/engines/media.test.ts`) cannot be forced by hand. |

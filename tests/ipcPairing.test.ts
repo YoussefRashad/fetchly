@@ -24,6 +24,21 @@ const DECLINED_TEXT = 'Settings were not saved: the port was not changed';
 const BUSY_TEXT = 'Settings are being saved';
 const FOUR_TEXT = 'Four browsers are already paired. Unpair one first.';
 const UNSAVED_TEXT = 'Unpaired, but the change is not saved yet; Fetchly keeps trying';
+const NOT_LISTENING_TEXT = 'Pairing is possible only while Fetchly is listening for the browser';
+const NOT_PAIRED_TEXT = 'This browser is not paired';
+const BAD_REQUEST_TEXT = 'That request is not valid';
+
+/** What a coded failure answers (Task D, item 2): the English text of today, its code and, for a detail code, its detail. */
+const failure = (error: string, code: string, detail?: string): Record<string, unknown> =>
+  detail === undefined ? { ok: false, error, code } : { ok: false, error, code, detail };
+const PORT_INVALID = failure(PORT_TEXT, 'portInvalid');
+const DECLINED = failure(DECLINED_TEXT, 'portChangeDeclined');
+const BUSY = failure(BUSY_TEXT, 'settingsBusy');
+const FOUR_PAIRED = failure(FOUR_TEXT, 'fourPaired');
+const UNPAIR_UNSAVED = failure(UNSAVED_TEXT, 'unpairUnsaved');
+const NOT_LISTENING_FAILURE = failure(NOT_LISTENING_TEXT, 'notListening');
+const NOT_PAIRED = failure(NOT_PAIRED_TEXT, 'notPaired');
+const BAD_REQUEST = failure(BAD_REQUEST_TEXT, 'badRequest');
 
 interface World {
   fx: IpcFixture;
@@ -156,7 +171,7 @@ describe('setSettings: serverPort (S14)', () => {
     const w = world();
     const [existing] = pairMany(w, 1);
     const res = await w.h.setSettings(withPort(port));
-    expect(res).toEqual({ ok: false, error: PORT_TEXT });
+    expect(res).toEqual(PORT_INVALID);
     expect(w.saved).toEqual([]);
     expect(w.queueSettings).toEqual([]);
     expect(w.fx.ensureCalls).toEqual([]);
@@ -170,13 +185,13 @@ describe('setSettings: serverPort (S14)', () => {
     const { serverPort: _omit, ...rest } = makeSettings();
     void _omit;
     const res = await w.h.setSettings(rest as Settings);
-    expect(res).toEqual({ ok: false, error: PORT_TEXT });
+    expect(res).toEqual(PORT_INVALID);
     expect(w.saved).toEqual([]);
   });
 
   it('a bad port is refused even when every other field is fine and the port equals the saved one by value only as a string', async () => {
     const w = world();
-    expect(await w.h.setSettings(withPort('38917'))).toEqual({ ok: false, error: PORT_TEXT });
+    expect(await w.h.setSettings(withPort('38917'))).toEqual(PORT_INVALID);
   });
 
   it('the other fields are still rebuilt and clamped next to a valid port', async () => {
@@ -269,7 +284,7 @@ describe('setSettings: the port-change flow (S15, R2-1)', () => {
     expect(w.fx.rig.store.open().ok).toBe(true);
     w.fx.confirm.answer = false;
     const res = await w.h.setSettings(makeSettings({ serverPort: 40000 }));
-    expect(res).toEqual({ ok: false, error: DECLINED_TEXT });
+    expect(res).toEqual(DECLINED);
     expect(w.saved).toEqual([]);
     expect(w.queueSettings).toEqual([]);
     expect(w.fx.ensureCalls).toEqual([]);
@@ -285,7 +300,7 @@ describe('setSettings: the port-change flow (S15, R2-1)', () => {
     expect(w.fx.rig.store.open().ok).toBe(true);
     w.failSave.on = true;
     const res = await w.h.setSettings(makeSettings({ serverPort: 40000 }));
-    expect(res.ok).toBe(false);
+    expect(res).toEqual(failure('Something went wrong: disk full', 'unexpected', 'disk full'));
     expect(w.fx.rig.store.list()).toEqual([]);
     expect(w.fx.rig.store.codeOpen()).toBe(false);
     expect(w.fx.ensureCalls).toEqual([]);
@@ -316,8 +331,8 @@ describe('setSettings: the port-change flow (S15, R2-1)', () => {
       const w = world();
       pairMany(w, 1);
       const { first, release } = await openDialog(w);
-      expect(await w.h.setSettings(makeSettings({ serverPort: 38917, maxConcurrent: 6 }))).toEqual({ ok: false, error: BUSY_TEXT });
-      expect(await w.h.setSettings(makeSettings({ serverPort: 41000 }))).toEqual({ ok: false, error: BUSY_TEXT });
+      expect(await w.h.setSettings(makeSettings({ serverPort: 38917, maxConcurrent: 6 }))).toEqual(BUSY);
+      expect(await w.h.setSettings(makeSettings({ serverPort: 41000 }))).toEqual(BUSY);
       expect(w.saved).toEqual([]);
       expect(w.fx.confirm.asked).toEqual([1]); // no second dialog
       release();
@@ -341,7 +356,7 @@ describe('setSettings: the port-change flow (S15, R2-1)', () => {
       w.fx.confirm.answer = false;
       const { first, release } = await openDialog(w);
       release();
-      expect(await first).toEqual({ ok: false, error: DECLINED_TEXT });
+      expect(await first).toEqual(DECLINED);
       w.fx.confirm.gate = null;
       expect((await w.h.setSettings(makeSettings({ serverPort: 38917, maxConcurrent: 2 }))).ok).toBe(true);
     });
@@ -370,7 +385,7 @@ describe('setSettings: the port-change flow (S15, R2-1)', () => {
         },
       });
       const res = await bad.h.setSettings(makeSettings({ serverPort: 40000 }));
-      expect(res.ok).toBe(false);
+      expect(res).toEqual(failure('Something went wrong: dialog failed', 'unexpected', 'dialog failed'));
       expect(bad.saved).toEqual([]);
       expect(w.fx.rig.store.list()).toHaveLength(1); // nothing was changed by a dialog that failed
       expect((await bad.h.setSettings(makeSettings({ serverPort: 38917 }))).ok).toBe(true);
@@ -455,10 +470,10 @@ describe('setSettings: a failed save, then a retry (production save order)', () 
   }
 
   /** A pairing made the way the Settings panel does it: pairingStart, then the extension redeems the string. */
-  async function pairViaStart(w: World, origin: string): Promise<{ pairingId: string; token: string }> {
+  async function pairViaStart(w: World, origin: string, port = 38917): Promise<{ pairingId: string; token: string }> {
     const started = await w.h.pairingStart();
     if (!started.ok) throw new Error(`pairingStart failed: ${started.error}`);
-    expect(started.value.pairingString.startsWith('38917-')).toBe(true);
+    expect(started.value.pairingString.startsWith(`${port}-`)).toBe(true);
     const parsed = parsePairingString(started.value.pairingString);
     if (!parsed) throw new Error('the pairing string did not parse');
     const res = w.fx.rig.store.redeem({ origin, port: parsed.port, code: parsed.code, label: 'Edge' });
@@ -570,15 +585,30 @@ describe('setSettings: a failed save, then a retry (production save order)', () 
     expect(w.fx.log).toEqual([...attempt, ...attempt, ...attempt, 'ensure:40000']);
   });
 
-  // Review 2, finding 1. A port counts as moved only once `ensure` resolved for it. If a step between the save and
-  // `ensure` throws, the listener is still on the old port and can still pair there, so the retry is a new port.
-  // The queue is that step in these cases: the save completes (the settings already say the new port), then
-  // queue.setSettings throws, and ensure is never reached.
+  // Task D, item 3 (frozen plan docs/plans/2026-11-23-d-housekeeping.md, "Item 3"). A port counts as moved only once
+  // `ensure` resolved for it (review 2, finding 1). The save completes (the settings already say the new port) and then
+  // queue.setSettings throws. That no longer stops the move: the listener still moves, listenerPort follows, and the
+  // answer is a success with the warning `savedNotApplied` (D3.1 to D3.3). A save that throws, and an `ensure` that
+  // rejects (a contract breach, D3.6), still fail the call and leave the listener where it was.
 
-  /** A world whose queue refuses the settings while `queueFails.on` (the save completes first), in the production save order. */
-  function queueRefusingWorld(): { w: World; queueFails: { on: boolean } } {
+  const QUEUE_REFUSED = 'the queue refused the settings';
+
+  /** The warning of the plan's table (savedNotApplied) for a queue that threw `detail`: the English text, the code, the detail. */
+  const savedNotApplied = (detail: string): { error: string; code: string; detail: string } => ({
+    error: `Settings were saved, but the running downloads did not take them: ${detail}. Save again, or restart Fetchly.`,
+    code: 'savedNotApplied',
+    detail,
+  });
+
+  /**
+   * A world whose queue throws `thrown()` from setSettings while `queueFails.on` (the save completes first), in the
+   * production save order. `thrown` is a function, so each call can throw something else. `deps` and `fx` override more.
+   */
+  function queueRefusingWorld(over: { thrown?: () => unknown; deps?: Partial<HandlerDeps>; fx?: IpcFixture } = {}): { w: World; queueFails: { on: boolean } } {
     const queueFails = { on: true };
+    const thrown = over.thrown ?? (() => new Error(QUEUE_REFUSED));
     const w = world({
+      ...(over.fx ? { fx: over.fx } : {}),
       deps: {
         queue: () => ({
           add: () => undefined,
@@ -587,9 +617,10 @@ describe('setSettings: a failed save, then a retry (production save order)', () 
           confirmStraysGone: () => undefined,
           snapshot: () => ({ jobs: [], groups: [] }),
           setSettings: () => {
-            if (queueFails.on) throw new Error('the queue refused the settings');
+            if (queueFails.on) throw thrown();
           },
         }),
+        ...over.deps,
       },
     });
     w.assignFirst.on = true;
@@ -597,72 +628,201 @@ describe('setSettings: a failed save, then a retry (production save order)', () 
     return { w, queueFails };
   }
 
-  it('the save completed but the queue refused the settings: the listener did not move, so the retry is still a new port', async () => {
-    const { w, queueFails } = queueRefusingWorld();
+  it('3.1 the queue refuses on a move to 40000 with one pairing: ok with the savedNotApplied warning, the listener moved', async () => {
+    const { w } = queueRefusingWorld();
     pairOnce(w.fx.rig.store, { origin: ORIGIN_A });
 
-    const failed = await w.h.setSettings(makeSettings({ serverPort: 40000 }));
-    expect(failed.ok).toBe(false);
+    const res = await w.h.setSettings(makeSettings({ serverPort: 40000 }));
+    expect(res).toEqual({ ok: true, value: makeSettings({ serverPort: 40000 }), warning: savedNotApplied(QUEUE_REFUSED) });
     expect(w.saved.map((s) => s.serverPort)).toEqual([40000]); // the save completed
-    expect(w.fx.ensureCalls).toEqual([]); // the listener did not move
-    expect(w.fx.state.current).toEqual({ state: 'listening', port: 38917 });
-    expect(w.fx.confirm.asked).toEqual([1]);
-    expect(w.fx.rig.store.list()).toEqual([]);
+    expect(w.fx.log).toEqual(['confirm', 'cancel', 'clear', 'saveSettings', 'ensure:40000']);
+    expect(w.fx.ensureCalls).toEqual([40000]);
+    expect(w.fx.state.current).toEqual({ state: 'listening', port: 40000 }); // the listener is on 40000
+    expect(w.fx.rig.store.list()).toEqual([]); // the pairings were emptied before the save
+    expect(w.fx.rig.disk.last).toEqual({ version: 1, pairings: [] });
+  });
 
-    const b = await pairViaStart(w, ORIGIN_B); // the string starts 38917-: the listener is still on the old port
+  it('3.2 then 40000 is saved again with the queue working: the same port, no dialog, no clear, no warning; a pairing made in between survives', async () => {
+    const { w, queueFails } = queueRefusingWorld();
+    pairOnce(w.fx.rig.store, { origin: ORIGIN_A });
+    expect((await w.h.setSettings(makeSettings({ serverPort: 40000 }))).ok).toBe(true);
+    const b = await pairViaStart(w, ORIGIN_B, 40000); // the string starts 40000-: the listener moved there
 
     queueFails.on = false;
     const mark = w.fx.log.length;
-    const retried = await w.h.setSettings(makeSettings({ serverPort: 40000 }));
-    expect(retried.ok).toBe(true);
-    expect(w.fx.confirm.asked).toEqual([1, 1]);
-    expect(w.fx.log.slice(mark)).toEqual(['confirm', 'cancel', 'clear', 'saveSettings', 'ensure:40000']);
-    expect(w.fx.rig.store.list()).toEqual([]);
-    expect(w.fx.rig.store.authenticate(ORIGIN_B, b.token)).toBeNull();
-    expect(w.fx.rig.store.proof(ORIGIN_B, b.pairingId, 40000, nonceOf())).toBeNull();
-    expect(w.fx.rig.disk.last).toEqual({ version: 1, pairings: [] });
-    expect(w.fx.ensureCalls).toEqual([40000]);
+    const res = await w.h.setSettings(makeSettings({ serverPort: 40000, maxConcurrent: 5 }));
+    expect(res).toEqual({ ok: true, value: makeSettings({ serverPort: 40000, maxConcurrent: 5 }) });
+    expect(res).not.toHaveProperty('warning');
+    expect(w.fx.confirm.asked).toEqual([1]); // only the first move asked
+    expect(w.fx.log.slice(mark)).toEqual(['saveSettings', 'ensure:40000']);
+    expect(w.fx.rig.store.list().map((p) => p.id)).toEqual([b.pairingId]);
+    expect(w.fx.rig.store.authenticate(ORIGIN_B, b.token)).not.toBeNull();
+    expect(w.fx.ensureCalls).toEqual([40000, 40000]);
   });
 
-  it('the queue refused the settings, a pairing was made on the old port, then the old port is saved: the same port, nothing asked or cleared, the pairing stays', async () => {
+  it('3.3 then 38917 is saved: a new port again (confirm when paired, cancel, clear)', async () => {
     const { w, queueFails } = queueRefusingWorld();
-    expect((await w.h.setSettings(makeSettings({ serverPort: 40000 }))).ok).toBe(false); // nothing paired yet: no dialog
-    expect(w.fx.confirm.asked).toEqual([]);
-    expect(w.fx.ensureCalls).toEqual([]);
-    const b = await pairViaStart(w, ORIGIN_B);
+    pairOnce(w.fx.rig.store, { origin: ORIGIN_A });
+    expect((await w.h.setSettings(makeSettings({ serverPort: 40000 }))).ok).toBe(true);
+    const b = await pairViaStart(w, ORIGIN_B, 40000);
 
     queueFails.on = false;
     const mark = w.fx.log.length;
     const res = await w.h.setSettings(makeSettings({ serverPort: 38917 }));
-    expect(res.ok).toBe(true);
-    expect(w.fx.confirm.asked).toEqual([]);
-    expect(w.fx.log.slice(mark)).toEqual(['saveSettings', 'ensure:38917']); // same port: no cancel, no clear
-    expect(w.fx.rig.store.list().map((p) => p.id)).toEqual([b.pairingId]);
-    expect(w.fx.rig.store.authenticate(ORIGIN_B, b.token)).not.toBeNull();
-    expect(w.fx.ensureCalls).toEqual([38917]);
-    expect(w.settings.current.serverPort).toBe(38917);
+    expect(res).toEqual({ ok: true, value: makeSettings({ serverPort: 38917 }) });
+    expect(w.fx.confirm.asked).toEqual([1, 1]);
+    expect(w.fx.log.slice(mark)).toEqual(['confirm', 'cancel', 'clear', 'saveSettings', 'ensure:38917']);
+    expect(w.fx.rig.store.list()).toEqual([]);
+    expect(w.fx.rig.store.authenticate(ORIGIN_B, b.token)).toBeNull();
+    expect(w.fx.state.current).toEqual({ state: 'listening', port: 38917 });
   });
 
-  it('the queue refuses twice with a pairing made before each retry: each attempt asks and clears, and none survives', async () => {
-    const { w, queueFails } = queueRefusingWorld();
-    for (const origin of [ORIGIN_A, ORIGIN_B]) {
-      const p = await pairViaStart(w, origin);
-      expect((await w.h.setSettings(makeSettings({ serverPort: 40000 }))).ok, `the refused attempt for ${origin}`).toBe(false);
-      expect(w.fx.rig.store.list(), `after the refused attempt for ${origin}`).toEqual([]);
-      expect(w.fx.rig.store.authenticate(origin, p.token)).toBeNull();
-      expect(w.fx.ensureCalls).toEqual([]);
-    }
-    queueFails.on = false;
-    const c = await pairViaStart(w, ORIGIN_C);
+  it('3.4 the queue refuses on the same port: no dialog, no cancel, no clear, ensure is called, ok with the warning', async () => {
+    const { w } = queueRefusingWorld();
+    const [a] = pairMany(w, 1);
+    expect(w.fx.rig.store.open().ok).toBe(true);
+
+    const res = await w.h.setSettings(makeSettings({ serverPort: 38917, maxConcurrent: 5 }));
+    expect(res).toEqual({ ok: true, value: makeSettings({ serverPort: 38917, maxConcurrent: 5 }), warning: savedNotApplied(QUEUE_REFUSED) });
+    expect(w.fx.confirm.asked).toEqual([]);
+    expect(w.fx.log).toEqual(['saveSettings', 'ensure:38917']);
+    expect(w.fx.ensureCalls).toEqual([38917]);
+    expect(w.fx.rig.store.list()).toHaveLength(1); // the pairing stays
+    expect(w.fx.rig.store.authenticate(ORIGIN_A, a?.token ?? '')).not.toBeNull();
+    expect(w.fx.rig.store.codeOpen()).toBe(true); // and so does the open code
+  });
+
+  it('3.5 the queue refuses twice in a row: each answer carries its own warning, and ensure is called each time', async () => {
+    let n = 0;
+    const { w } = queueRefusingWorld({
+      thrown: () => {
+        n += 1;
+        return new Error(`refusal ${n}`);
+      },
+    });
+    const first = await w.h.setSettings(makeSettings({ serverPort: 40000 }));
+    const second = await w.h.setSettings(makeSettings({ serverPort: 40000 }));
+    expect(first).toMatchObject({ ok: true, warning: savedNotApplied('refusal 1') });
+    expect(second).toMatchObject({ ok: true, warning: savedNotApplied('refusal 2') });
+    expect(w.fx.ensureCalls).toEqual([40000, 40000]);
+    expect(w.saved.map((s) => s.serverPort)).toEqual([40000, 40000]);
+  });
+
+  it('3.6 the queue refuses and ensure rejects: unexpected with ensure’s message as detail, no warning, and that port is still a new port', async () => {
+    const fx = makeIpcServerFixture();
+    const rejectNext = { on: true };
+    const { w, queueFails } = queueRefusingWorld({
+      fx,
+      deps: {
+        server: {
+          status: fx.deps.server.status,
+          ensure: async (port: number): Promise<ServerStatus> => {
+            if (rejectNext.on) {
+              rejectNext.on = false;
+              fx.log.push(`ensure:${port}`);
+              fx.ensureCalls.push(port);
+              throw new Error('ensure broke its contract'); // before the fake moves its state: the listener stays on 38917
+            }
+            return fx.deps.server.ensure(port);
+          },
+        },
+      },
+    });
+    pairOnce(w.fx.rig.store, { origin: ORIGIN_A });
+
     const res = await w.h.setSettings(makeSettings({ serverPort: 40000 }));
-    expect(res.ok).toBe(true);
-    expect(w.fx.confirm.asked).toEqual([1, 1, 1]);
-    expect(w.fx.rig.store.list()).toEqual([]);
-    expect(w.fx.rig.store.authenticate(ORIGIN_C, c.token)).toBeNull();
-    expect(w.fx.rig.disk.last).toEqual({ version: 1, pairings: [] });
+    expect(res).toEqual({ ok: false, error: 'Something went wrong: ensure broke its contract', code: 'unexpected', detail: 'ensure broke its contract' });
+    expect(res).not.toHaveProperty('warning');
+    expect(JSON.stringify(res)).not.toContain(QUEUE_REFUSED); // ensure's message, not the queue's
+    expect(w.fx.log).toEqual(['confirm', 'cancel', 'clear', 'saveSettings', 'ensure:40000']);
+    expect(w.fx.state.current).toEqual({ state: 'listening', port: 38917 });
+
+    // listenerPort was left alone: the listener is on 38917, a pairing can be made there, and the retry is a new port
+    const b = await pairViaStart(w, ORIGIN_B);
+    queueFails.on = false;
+    const mark = w.fx.log.length;
+    const retried = await w.h.setSettings(makeSettings({ serverPort: 40000 }));
+    expect(retried).toEqual({ ok: true, value: makeSettings({ serverPort: 40000 }) });
+    expect(retried).not.toHaveProperty('warning');
+    expect(w.fx.confirm.asked).toEqual([1, 1]);
+    expect(w.fx.log.slice(mark)).toEqual(['confirm', 'cancel', 'clear', 'saveSettings', 'ensure:40000']);
+    expect(w.fx.rig.store.authenticate(ORIGIN_B, b.token)).toBeNull();
+  });
+
+  it('3.7 a second call during the dialog fails with settingsBusy, and the call after a queue refusal is accepted', async () => {
+    const { w } = queueRefusingWorld();
+    pairOnce(w.fx.rig.store, { origin: ORIGIN_A });
+    let release: () => void = () => undefined;
+    w.fx.confirm.gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const first = w.h.setSettings(makeSettings({ serverPort: 40000 }));
+    await vi.waitFor(() => expect(w.fx.confirm.asked).toEqual([1]));
+
+    const busy = await w.h.setSettings(makeSettings({ serverPort: 41000 }));
+    expect(busy).toEqual({ ok: false, error: BUSY_TEXT, code: 'settingsBusy' });
+    expect(w.saved).toEqual([]);
+    expect(w.fx.confirm.asked).toEqual([1]); // no second dialog
+
+    release();
+    expect(await first).toMatchObject({ ok: true, warning: { code: 'savedNotApplied' } });
+    // settingsBusy was released although the queue threw: the next call is accepted (and refused by the queue again)
+    w.fx.confirm.gate = null;
+    const after = await w.h.setSettings(makeSettings({ serverPort: 40000, maxConcurrent: 2 }));
+    expect(after).toMatchObject({ ok: true, value: { serverPort: 40000, maxConcurrent: 2 }, warning: { code: 'savedNotApplied' } });
+    expect(w.saved.map((s) => s.serverPort)).toEqual([40000, 40000]);
+  });
+
+  it('3.8 there is no queue yet (deps.queue() returns null): ok, and no warning', async () => {
+    const w = world({ deps: { queue: () => null } });
+    const res = await w.h.setSettings(makeSettings({ serverPort: 40000 }));
+    expect(res).toEqual({ ok: true, value: makeSettings({ serverPort: 40000 }) });
+    expect(res).not.toHaveProperty('warning');
+    expect(w.fx.log).toEqual(['cancel', 'clear', 'saveSettings', 'ensure:40000']);
+    expect(w.queueSettings).toEqual([]);
+  });
+
+  it('3.9 the queue throws a string that is not an Error: the warning’s detail is that string', async () => {
+    const { w } = queueRefusingWorld({ thrown: () => 'plain' });
+    const res = await w.h.setSettings(makeSettings({ serverPort: 40000 }));
+    expect(res).toEqual({ ok: true, value: makeSettings({ serverPort: 40000 }), warning: savedNotApplied('plain') });
     expect(w.fx.ensureCalls).toEqual([40000]);
-    const attempt = ['confirm', 'cancel', 'clear', 'saveSettings'];
-    expect(w.fx.log).toEqual([...attempt, ...attempt, ...attempt, 'ensure:40000']);
+  });
+
+  it('3.10 the queue refuses and ensure resolves without listening (portBusy): still ok with the warning, and the port counts as moved to', async () => {
+    const { w, queueFails } = queueRefusingWorld();
+    w.fx.ensureResult.next = { state: 'portBusy', port: 40000 };
+    const res = await w.h.setSettings(makeSettings({ serverPort: 40000 }));
+    expect(res).toMatchObject({ ok: true, warning: savedNotApplied(QUEUE_REFUSED) });
+    expect(w.fx.state.current).toEqual({ state: 'portBusy', port: 40000 });
+
+    // the port is free now, the queue works: the same port, so no dialog and no clear, and ensure is the retry
+    w.fx.ensureResult.next = null;
+    queueFails.on = false;
+    const mark = w.fx.log.length;
+    const retried = await w.h.setSettings(makeSettings({ serverPort: 40000 }));
+    expect(retried).toEqual({ ok: true, value: makeSettings({ serverPort: 40000 }) });
+    expect(w.fx.log.slice(mark)).toEqual(['saveSettings', 'ensure:40000']);
+    expect(w.fx.state.current).toEqual({ state: 'listening', port: 40000 });
+  });
+
+  it('3.11 the save throws: unchanged, the queue is not reached, no warning, and the listener does not move', async () => {
+    const { w } = queueRefusingWorld();
+    w.failSave.on = true;
+    const res = await w.h.setSettings(makeSettings({ serverPort: 40000 }));
+    expect(res).toEqual({ ok: false, error: 'Something went wrong: disk full', code: 'unexpected', detail: 'disk full' });
+    expect(res).not.toHaveProperty('warning');
+    expect(w.fx.ensureCalls).toEqual([]);
+    expect(w.fx.state.current).toEqual({ state: 'listening', port: 38917 });
+  });
+
+  it('3.12 the warning is JSON-safe and carries exactly error, code and detail', async () => {
+    const { w } = queueRefusingWorld();
+    const res = await w.h.setSettings(makeSettings({ serverPort: 40000 }));
+    if (!res.ok) throw new Error('expected ok');
+    expect(Object.keys(res.warning ?? {}).sort()).toEqual(['code', 'detail', 'error']);
+    expect(Object.keys(res).sort()).toEqual(['ok', 'value', 'warning']);
+    expect(JSON.parse(JSON.stringify(res))).toEqual(res);
   });
 
   it('ensure rejects once (a contract breach): the listener is still on the old port, so after a pairing there the retry asks and clears', async () => {
@@ -815,7 +975,7 @@ describe('pairingStart', () => {
     const w = world();
     w.fx.state.current = state;
     const res = await w.h.pairingStart();
-    expect(res.ok).toBe(false);
+    expect(res).toEqual(NOT_LISTENING_FAILURE); // notListening: portBusy and error alike
     expect(w.fx.rig.store.codeOpen()).toBe(false);
   });
 
@@ -825,7 +985,7 @@ describe('pairingStart', () => {
       // The store keeps seeing "listening" (its own server-state dependency), so only the handler can refuse.
       const w = world({ deps: { server: { status: () => state, ensure: async () => state } } });
       const res = await w.h.pairingStart();
-      expect(res.ok).toBe(false);
+      expect(res).toEqual(NOT_LISTENING_FAILURE);
       expect(w.fx.rig.store.codeOpen()).toBe(false);
     },
   );
@@ -834,8 +994,38 @@ describe('pairingStart', () => {
     const w = world();
     pairMany(w, 4);
     const res = await w.h.pairingStart();
-    expect(res).toEqual({ ok: false, error: FOUR_TEXT });
+    expect(res).toEqual(FOUR_PAIRED);
     expect(w.fx.rig.store.codeOpen()).toBe(false);
+  });
+
+  // D2.5: pairing.ts is not edited, so ipc.ts maps the store's refusal text to a code by comparing it with the two
+  // constants of pairing.ts (pinned equal to ERROR_TEXT in tests/errorCodes.test.ts). Anything else is forwarded as it is.
+  it('notListening through the store (D2.5): the store refuses with the not-listening text while the server status is listening', async () => {
+    const base = world();
+    expect(base.fx.state.current.state).toBe('listening');
+    const stubbed = world({ fx: base.fx, deps: { pairing: { ...base.fx.rig.store, open: () => ({ ok: false, error: NOT_LISTENING_TEXT }) } } });
+    expect(await stubbed.h.pairingStart()).toEqual(NOT_LISTENING_FAILURE);
+  });
+
+  it('fourPaired through the store (D2.5): the store refuses with the four-paired text', async () => {
+    const base = world();
+    const stubbed = world({ fx: base.fx, deps: { pairing: { ...base.fx.rig.store, open: () => ({ ok: false, error: FOUR_TEXT }) } } });
+    expect(await stubbed.h.pairingStart()).toEqual(FOUR_PAIRED);
+  });
+
+  it.each([
+    ['another text', 'The pairing store is closed for maintenance'],
+    ['the four-paired text with a trailing space', `${FOUR_TEXT} `],
+    ['the not-listening text in lower case', NOT_LISTENING_TEXT.toLowerCase()],
+    ['the not-listening text without its last word', NOT_LISTENING_TEXT.replace(' the browser', '')],
+    ['an empty text', ''],
+  ])('(no code) a store whose open() fails with %s: forwarded as it came, with no code', async (_name, text) => {
+    const base = world();
+    const stubbed = world({ fx: base.fx, deps: { pairing: { ...base.fx.rig.store, open: () => ({ ok: false, error: text }) } } });
+    const res = await stubbed.h.pairingStart();
+    expect(res).toEqual({ ok: false, error: text });
+    expect(res).not.toHaveProperty('code');
+    expect(res).not.toHaveProperty('detail');
   });
 
   it('works at 3 pairings', async () => {
@@ -945,15 +1135,15 @@ describe('unpair', () => {
     const w = world();
     pairMany(w, 1);
     const res = await w.h.unpair(id as string);
-    expect(res.ok).toBe(false);
+    expect(res).toEqual(BAD_REQUEST); // badRequest
     expect(w.fx.rig.store.list()).toHaveLength(1);
   });
 
   it('an unknown id fails and removes nothing', async () => {
     const w = world();
     pairMany(w, 2);
-    expect((await w.h.unpair('Z'.repeat(22))).ok).toBe(false);
-    expect((await w.h.unpair('')).ok).toBe(false);
+    expect(await w.h.unpair('Z'.repeat(22))).toEqual(NOT_PAIRED); // notPaired
+    expect(await w.h.unpair('')).toEqual(NOT_PAIRED);
     expect(w.fx.rig.store.list()).toHaveLength(2);
   });
 
@@ -961,7 +1151,7 @@ describe('unpair', () => {
     const w = world();
     const [a] = pairMany(w, 1);
     expect((await w.h.unpair(a?.pairingId ?? '')).ok).toBe(true);
-    expect((await w.h.unpair(a?.pairingId ?? '')).ok).toBe(false);
+    expect(await w.h.unpair(a?.pairingId ?? '')).toEqual(NOT_PAIRED);
   });
 
   it('with a failing save removes the entry and fails with the "not saved yet" text', async () => {
@@ -969,7 +1159,7 @@ describe('unpair', () => {
     const [a] = pairMany(w, 1);
     w.fx.rig.disk.failing = true;
     const res = await w.h.unpair(a?.pairingId ?? '');
-    expect(res).toEqual({ ok: false, error: UNSAVED_TEXT });
+    expect(res).toEqual(UNPAIR_UNSAVED); // unpairUnsaved
     expect(w.fx.rig.store.list()).toEqual([]); // revoked at once
     expect(w.fx.rig.store.authenticate(ORIGIN_A, a?.token ?? '')).toBeNull();
     expect((await w.h.pairings()).unsaved).toBe(true);
@@ -1016,7 +1206,7 @@ describe('wiring', () => {
         },
       },
     });
-    expect((await broken.h.pairingStart()).ok).toBe(false);
-    expect((await broken.h.unpair('A'.repeat(22))).ok).toBe(false);
+    expect(await broken.h.pairingStart()).toEqual(failure('Something went wrong: boom', 'unexpected', 'boom'));
+    expect(await broken.h.unpair('A'.repeat(22))).toEqual(failure('Something went wrong: boom', 'unexpected', 'boom'));
   });
 });

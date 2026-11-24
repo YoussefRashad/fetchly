@@ -1,11 +1,12 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { qualityLabel, reasonText, statusParts, statusText } from '../../src/renderer/src/format';
+import { knownReason, qualityLabel, reasonText, statusParts, statusText } from '../../src/renderer/src/format';
 import { EN, setLanguage } from '../../src/renderer/src/strings';
 import { fsi } from '../../src/shared/i18n';
 import type { EntryReason } from '../../src/shared/types';
 import { classifyError } from '../../src/main/ytdlp/parse';
+import { NEW_REASONS } from '../errorTable';
 import { makeJob } from '../helpers';
 
 const half = { bytesDone: 50, bytesTotal: 200 };
@@ -91,6 +92,72 @@ describe('reasonText', () => {
   });
 });
 
+describe('the reasons of the link probe (Task D, item 2)', () => {
+  it.each(NEW_REASONS)('%j is translated through reasonText, and kept in English', (reason, ar) => {
+    expect(reasonText(reason)).toBe(reason);
+    setLanguage('ar');
+    expect(reasonText(reason)).toBe(ar);
+  });
+
+  it.each(NEW_REASONS)('%j is a key of EN.reasons, spelled as the probe throws it', (reason) => {
+    expect(Object.hasOwn(EN.reasons, reason)).toBe(true);
+    expect(EN.reasons[reason as keyof typeof EN.reasons]).toBe(reason);
+  });
+
+  it.each(NEW_REASONS)('%j shows in a failed job, isolated once in Arabic', (reason, ar) => {
+    expect(statusText(makeJob({ state: 'failed', reason }))).toBe(`failed: ${reason}`);
+    setLanguage('ar');
+    expect(statusText(makeJob({ state: 'failed', reason }))).toBe(`فشل: ${fsi(ar)}`);
+  });
+
+  it('"server answered 503" is not a job reason: reasonText keeps it as it came (the pattern lives in errors.ts, C5)', () => {
+    expect(reasonText('server answered 503')).toBe('server answered 503');
+    setLanguage('ar');
+    expect(reasonText('server answered 503')).toBe('server answered 503');
+  });
+});
+
+describe('knownReason', () => {
+  it('gives the table entry of a known reason, in the language in use', () => {
+    expect(knownReason('login required')).toBe('login required');
+    expect(knownReason('could not reach the server')).toBe('could not reach the server');
+    setLanguage('ar');
+    expect(knownReason('login required')).toBe('يتطلب تسجيل الدخول');
+    expect(knownReason('could not reach the server')).toBe('تعذّر الوصول إلى الخادم');
+  });
+
+  it('gives the words of a retry count', () => {
+    expect(knownReason('retrying (2/3)')).toBe('retrying (2/3)');
+    setLanguage('ar');
+    expect(knownReason('retrying (2/3)')).toBe('إعادة المحاولة (2/3)');
+    expect(knownReason('retrying (10/12)')).toBe('إعادة المحاولة (10/12)');
+  });
+
+  it.each(['unable to download video data', '', 'Login required', 'login required ', 'server answered 503', 'server answered', 'retrying (2/x)', 'Retrying (2/3)'])(
+    'gives null for %j, which is not a known reason',
+    (text) => {
+      expect(knownReason(text)).toBeNull();
+      setLanguage('ar');
+      expect(knownReason(text)).toBeNull();
+    },
+  );
+
+  it.each(['constructor', 'toString', '__proto__', 'hasOwnProperty'])('gives null for %j: only the dictionary own keys are reasons', (text) => {
+    expect(knownReason(text)).toBeNull();
+    setLanguage('ar');
+    expect(knownReason(text)).toBeNull();
+  });
+
+  it('reasonText is knownReason or the text as it came', () => {
+    for (const text of ['login required', 'retrying (2/3)', 'unable to download video data', 'server answered 503', '', 'constructor']) {
+      expect(reasonText(text)).toBe(knownReason(text) ?? text);
+      setLanguage('ar');
+      expect(reasonText(text)).toBe(knownReason(text) ?? text);
+      setLanguage('en');
+    }
+  });
+});
+
 describe('the reasons contract', () => {
   const keys = new Set(Object.keys(EN.reasons));
 
@@ -129,6 +196,23 @@ describe('the reasons contract', () => {
     for (const m of file.matchAll(/^const SERVICE_\w+ = '([^']+)';$/gmu)) found.add(m[1] as string);
     expect(found.size).toBeGreaterThan(10);
     expect([...found].filter((r) => !keys.has(r))).toEqual([]);
+  });
+
+  // The promise of the JSDoc on EN.reasons: "every fixed reason of the link probe", by its English text.
+  it('every fixed reason the link probe throws is a key, in both languages', () => {
+    const src = readFileSync(join(__dirname, '../../src/main/probe.ts'), 'utf8');
+    const found = new Set<string>();
+    for (const m of src.matchAll(/new ProbeError\('([^']+)'\)/gu)) found.add(m[1] as string);
+    for (const m of src.matchAll(/^(?:export )?const [A-Z_]+ = '([^']+)';$/gmu)) found.add(m[1] as string);
+    // The six fixed reasons of probe.ts: yt-dlp missing, the time limit, unreadable output, stopped early, no server, a web page.
+    expect(found.size).toBeGreaterThanOrEqual(6);
+    expect([...found].filter((r) => !keys.has(r))).toEqual([]);
+    for (const r of NEW_REASONS.map(([reason]) => reason)) expect(found.has(r), r).toBe(true);
+  });
+
+  it('every key of EN.reasons, the three new ones included, has an Arabic text of its own', () => {
+    setLanguage('ar');
+    for (const reason of keys) expect(reasonText(reason), reason).not.toBe(reason);
   });
 });
 

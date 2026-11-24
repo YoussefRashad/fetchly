@@ -1,0 +1,235 @@
+{
+  "schema": 3,
+  "skill": "project-setup",
+  "skillVersion": "3.2.0",
+  "mode": "fresh",
+  "agents": [
+    "claude",
+    "codex"
+  ],
+  "sourceCommit": "0beea0a",
+  "files": {
+    ".ai/agents/docs-sync.md": {
+      "ownership": "full",
+      "sha256": "45efb2264bf5e0df4a8d2100f1030563ab0ce68dd15e7fa365df648ebcdff946"
+    },
+    ".ai/agents/docs-sync.project.md": {
+      "ownership": "merged"
+    },
+    ".ai/agents/reviewer.md": {
+      "ownership": "full",
+      "sha256": "72a64e5d15565d1f532149b114127bc8341258c3ef9b45da7f5910a28b94c8d8"
+    },
+    ".ai/agents/reviewer.project.md": {
+      "ownership": "merged"
+    },
+    ".ai/context/code-patterns.md": {
+      "ownership": "merged"
+    },
+    ".ai/context/configuration.md": {
+      "ownership": "merged"
+    },
+    ".ai/context/critical-modules.md": {
+      "ownership": "merged"
+    },
+    ".ai/context/development-rules.md": {
+      "ownership": "merged"
+    },
+    ".ai/context/error-contract.md": {
+      "ownership": "merged"
+    },
+    ".ai/context/glossary.md": {
+      "ownership": "merged"
+    },
+    ".ai/context/project-tree.md": {
+      "ownership": "merged"
+    },
+    ".ai/decisions/001-electron-desktop-app.md": {
+      "ownership": "merged"
+    },
+    ".ai/decisions/002-wrap-external-tools.md": {
+      "ownership": "merged"
+    },
+    ".ai/decisions/003-no-drm.md": {
+      "ownership": "merged"
+    },
+    ".ai/decisions/004-local-server-protocol.md": {
+      "ownership": "merged"
+    },
+    ".ai/decisions/README.md": {
+      "ownership": "merged"
+    },
+    ".ai/security-paths.json": {
+      "ownership": "full",
+      "sha256": "929e43a618fba062bc5950e5f91595fb197d4fcfc7e04ee02b6ce4dab80b3eca"
+    },
+    ".ai/tools/git-safe-core.mjs": {
+      "ownership": "full",
+      "sha256": "d8e7e573b8dfb9edbee90023838547a2b0cae694cbcdc9e66b22a0b4659bcb7a"
+    },
+    ".ai/tools/git-safe.mjs": {
+      "ownership": "full",
+      "sha256": "995bafa72582acad616982549e4c0aa581831bc25b132f83a533f7bad91bb154"
+    },
+    ".ai/tools/guard-raw-git-core.mjs": {
+      "ownership": "full",
+      "sha256": "cee120da3205767a4b2e17515948be55185d047175c8f5d91d38eeaa4d9210c9"
+    },
+    ".ai/tools/guard-raw-git.mjs": {
+      "ownership": "full",
+      "sha256": "7b6b8e7e5d11850656f8395563c0f6d0788a234fbc01b9642b30ae231862276e"
+    },
+    ".ai/tools/hooks-selftest.mjs": {
+      "ownership": "full",
+      "sha256": "175fa8611582fe0c8eafd8032c5dbb3c6e981e8cf9f710653c87529b58f6ba66"
+    },
+    ".ai/tools/review-diff.mjs": {
+      "ownership": "full",
+      "sha256": "745d55310baebb72c1683ff6022e1ed8517e370cd5c2ccbc0e5d8bbb4b8d7653"
+    },
+    ".ai/tools/security-policy.mjs": {
+      "ownership": "full",
+      "sha256": "2ded982e54580fc993add5b4003bc892dd08e230ea3c7d98892fccdb6fc83dbb"
+    },
+    ".claude/agents/docs-sync.md": {
+      "ownership": "full",
+      "sha256": "36226eb38aeba62fa4fbad6627e2e2843a7857f167eec00f09e9688f69d02a43"
+    },
+    ".claude/agents/reviewer.md": {
+      "ownership": "full",
+      "sha256": "284332b25720b824a6369f7f9fb3af04fa5f7399be407221c4e47c24652f0423"
+    },
+    ".claude/settings.json": {
+      "ownership": "keys",
+      "managed": {
+        "permissions.deny": [
+          "Read(**/.env*)",
+          "Read(**/*.pem)",
+          "Read(**/*.key)",
+          "Read(**/*.p12)",
+          "Read(**/*.pfx)",
+          "Read(**/*.crt)",
+          "Read(**/*.cer)",
+          "Read(**/*.cert)",
+          "Read(**/*.jks)",
+          "Read(**/*.keystore)",
+          "Read(**/id_rsa*)",
+          "Read(**/id_ed25519*)",
+          "Read(**/secrets/**)",
+          "Read(**/credentials/**)",
+          "Read(/env/**)",
+          "Read(/cert/**)",
+          "Read(**/.aws/**)",
+          "Read(**/.ssh/**)",
+          "Read(**/.gnupg/**)",
+          "Read(**/.npmrc)",
+          "Read(**/.htpasswd)",
+          "Read(**/.ai/.run/*/vault/**)",
+          "Bash(rm -rf *)",
+          "Bash(git reset --hard*)",
+          "Bash(git clean *)",
+          "Bash(git push --force*)",
+          "Bash(git push -f*)",
+          "Bash(git checkout -- *)",
+          "Bash(git restore *)",
+          "Bash(curl * | bash*)",
+          "Bash(curl * | sh*)",
+          "Bash(wget * | bash*)",
+          "Bash(npm publish*)",
+          "Bash(terraform apply*)",
+          "Bash(terraform destroy*)",
+          "Bash(kubectl delete *)",
+          "Bash(helm uninstall *)",
+          "PowerShell(Remove-Item * -Recurse*)",
+          "PowerShell(git reset --hard*)",
+          "PowerShell(git clean *)",
+          "PowerShell(git push --force*)",
+          "PowerShell(git push -f*)",
+          "PowerShell(npm publish*)",
+          "PowerShell(Invoke-Expression *)",
+          "PowerShell(iex *)"
+        ],
+        "heldBack": [],
+        "hooks": [
+          {
+            "event": "PreToolUse",
+            "matcher": "Bash|PowerShell",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.ai/tools/guard-raw-git.mjs\""
+          }
+        ]
+      }
+    },
+    ".codex/agents/docs_sync.toml": {
+      "ownership": "full",
+      "sha256": "1e6eef9ae6d75c0fef3c79b9879a0d69c4ad88d774889b81d09558cd61af6287"
+    },
+    ".codex/agents/reviewer.toml": {
+      "ownership": "full",
+      "sha256": "fe21c05b09bcba96b631bb08e22e6be807cdc8e0c75a740acff1b70c683c695c"
+    },
+    ".gitignore": {
+      "ownership": "blocks",
+      "blocks": {
+        "gitignore": "34c13766d597a8fe6fee66709a24216d4e8cd7c364cae551fef458a8a10dc3b2"
+      }
+    },
+    "AGENTS.md": {
+      "ownership": "blocks",
+      "blocks": {
+        "overview": "2237b05938db49a71f58f562df92c7765f496d05af8affe6a86f9384e032673b",
+        "critical-rules": "428871ea70f2f8a39962247deb6445df1e97f4af8f459212d444f5b4ea3654b9",
+        "commands": "0512ca80e34938b5d09ae33e3c5046a12cff178ad142c11c8712346112797814",
+        "navigation": "fc9078d56105283a3951c77593b777cebd07b5146f503ce7ee00c7a64a39abf3",
+        "local-instructions": "732c76045727398379ceae182556a7312bbaae0cf458e2da35a94bc43e7ac16c",
+        "agents": "ff975ee241510f6311b3524d8eb71977b4e149bb1f3fc1505d983a28658e0219"
+      }
+    },
+    "CLAUDE.md": {
+      "ownership": "blocks",
+      "blocks": {
+        "claude": "9b14593c9c35330175aa65908aa3220d1007905e0fee47baac5d13dbca20127d"
+      }
+    },
+    "TODO.md": {
+      "ownership": "merged"
+    },
+    "docs/api-conventions.md": {
+      "ownership": "merged"
+    },
+    "docs/business-rules/job-lifecycle.md": {
+      "ownership": "merged"
+    },
+    "docs/integrations/aria2.md": {
+      "ownership": "merged"
+    },
+    "docs/integrations/tool-downloads.md": {
+      "ownership": "merged"
+    },
+    "docs/integrations/yt-dlp.md": {
+      "ownership": "merged"
+    },
+    "docs/persistence.md": {
+      "ownership": "merged"
+    },
+    "src/main/jobs/AGENTS.md": {
+      "ownership": "blocks",
+      "blocks": {
+        "local": "f313e352b03e402a8237e649ad1c1bd2197ac61b31a38791133b07b29e53e088"
+      }
+    },
+    "src/main/jobs/CLAUDE.md": {
+      "ownership": "full",
+      "sha256": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+    },
+    "src/main/server/AGENTS.md": {
+      "ownership": "blocks",
+      "blocks": {
+        "local": "7021914e9b228ea76fcb707a9da1a5ee57c91753284f9887c5b80c9a9d3d9532"
+      }
+    },
+    "src/main/server/CLAUDE.md": {
+      "ownership": "full",
+      "sha256": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+    }
+  }
+}

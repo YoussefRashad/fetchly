@@ -1,3 +1,4 @@
+import { ERROR_TEXT } from '../shared/errors';
 import type { EngineStatus } from '../shared/types';
 import type { Aria2Daemon } from './engines/file';
 
@@ -23,11 +24,12 @@ export interface EngineHostDeps<Q> {
   onStatus(status: EngineStatus): void;
 }
 
-const COULD_NOT_START = 'The download tools could not be started: ';
-const SERVICE_STOPPED = 'The file download service stopped';
+/** aria2 exited: the English text and its code. Copied at each use. */
+const SERVICE_STOPPED: EngineStatus = { state: 'error', message: ERROR_TEXT.fileServiceStopped, code: 'fileServiceStopped' };
 
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
+/** Compares state and message only: the code follows from the message (and the detail is part of it). */
 function same(a: EngineStatus, b: EngineStatus): boolean {
   if (a.state !== b.state) return false;
   return a.state !== 'error' || a.message === (b as { message: string }).message;
@@ -106,7 +108,8 @@ export class EngineHost<Q> {
   }
 
   private fail(e: unknown): void {
-    this.set({ state: 'error', message: `${COULD_NOT_START}${message(e)}` });
+    const detail = message(e);
+    this.set({ state: 'error', message: ERROR_TEXT.toolsStartFailed(detail), code: 'toolsStartFailed', detail });
   }
 
   /** Reports the daemon's state once it is in use: ready, or stopped if it already died. */
@@ -115,7 +118,7 @@ export class EngineHost<Q> {
       this.set({ state: 'ready' });
     } else {
       if (this.watched === daemon) this.watched = null;
-      this.set({ state: 'error', message: SERVICE_STOPPED });
+      this.set({ ...SERVICE_STOPPED });
     }
   }
 
@@ -126,7 +129,7 @@ export class EngineHost<Q> {
       // Only the current aria2 counts, once, and only while a queue depends on it.
       if (this.watched !== daemon || this.q === null) return;
       this.watched = null;
-      this.set({ state: 'error', message: SERVICE_STOPPED });
+      this.set({ ...SERVICE_STOPPED });
     });
   }
 

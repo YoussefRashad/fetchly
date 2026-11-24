@@ -42,8 +42,11 @@ function start(scenario: string, over: Partial<Job> = {}, context: StartContext 
   return job;
 }
 
-/** Replaces the engine with one whose kill the test watches and can switch off. */
-function makeEngine(opts: { probeTimeoutMs?: number; stopTimeoutMs?: number } = {}, exe: Exe = FAKE): MediaEngine {
+/**
+ * Replaces the engine with one whose kill the test watches and can switch off. `probeOutputCap` (Task D, item 4) is
+ * passed through to the engine with the rest of `opts`.
+ */
+function makeEngine(opts: { probeTimeoutMs?: number; stopTimeoutMs?: number; probeOutputCap?: number } = {}, exe: Exe = FAKE): MediaEngine {
   engine = new MediaEngine(exe, 'C:\\bin\\ffmpeg.exe', {
     ...opts,
     kill: (child) => {
@@ -101,8 +104,88 @@ function paddedProbe(bytes: number): Buffer {
   return Buffer.from(head + 'x'.repeat(bytes - head.length - tail.length) + tail);
 }
 
+/** How the height check of `overCapProbe` ends. */
+type ProbeEnd =
+  | 'hang' // stays until it is killed
+  | { exit: number } // exits with this code at once
+  | { exit: number; holdUntil: string }; // exits with this code once that file exists: the spec releases it
+
+interface ProbeScript {
+  /** The height-check output, written first in one piece. */
+  output: Buffer | string;
+  /** Further bytes written after `output` (default none), a megabyte at a time. */
+  more?: number;
+  /** Written to stderr before the end. */
+  stderr?: string;
+  end: ProbeEnd;
+}
+
+/**
+ * A yt-dlp stand-in for the over-cap specs; every run that is not the height check is the fake. Its height check
+ * writes `output` in one piece, then `more` further bytes (each write finished before the next starts, so a parent
+ * that stops reading blocks it), then `stderr`, then ends as `end` says. `holdUntil` is the lingering child without a
+ * clock: it lives exactly until the spec creates the file. `aliveAtDownload()` has, for each download that started,
+ * whether the height check's process was still alive when that download began (false = it had already ended).
+ */
+function overCapProbe(script: ProbeScript): { exe: Exe; aliveAtDownload: () => boolean[] } {
+  const outFile = join(dir, 'overcap-output.bin');
+  const cfgFile = join(dir, 'overcap-config.json');
+  const pidFile = join(dir, 'overcap-probe.pid');
+  const aliveLog = join(dir, 'overcap-alive.log');
+  writeFileSync(outFile, script.output);
+  writeFileSync(cfgFile, JSON.stringify({ more: script.more ?? 0, stderr: script.stderr ?? '', end: script.end }));
+  const file = join(dir, 'overcap-ytdlp.mjs');
+  writeFileSync(
+    file,
+    [
+      "import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';",
+      'const args = process.argv.slice(2);',
+      'const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));',
+      "if (args.includes('-J') && args.includes('--no-playlist')) {",
+      `  const cfg = JSON.parse(readFileSync(${JSON.stringify(cfgFile)}, 'utf8'));`,
+      `  writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`,
+      '  const write = (data, stream = process.stdout) => new Promise((resolve) => stream.write(data, () => resolve()));',
+      `  await write(readFileSync(${JSON.stringify(outFile)}));`,
+      '  if (cfg.more > 0) await pause(30);', // a later write is a later chunk, most of the time
+      '  for (let left = cfg.more; left > 0; left -= 1048576) await write(Buffer.alloc(Math.min(left, 1048576), 0x79));',
+      "  if (cfg.stderr !== '') await write(cfg.stderr, process.stderr);",
+      "  if (cfg.end === 'hang') setInterval(() => {}, 1000);",
+      '  else {',
+      '    while (cfg.end.holdUntil !== undefined && !existsSync(cfg.end.holdUntil)) await pause(20);',
+      '    process.exit(cfg.end.exit);',
+      '  }',
+      '} else {',
+      '  let alive = true;',
+      `  try { process.kill(Number(readFileSync(${JSON.stringify(pidFile)}, 'utf8')), 0); } catch { alive = false; }`,
+      `  appendFileSync(${JSON.stringify(aliveLog)}, (alive ? 'alive' : 'ended') + '\\n');`,
+      `  await import(${JSON.stringify(pathToFileURL(FAKE_PATH).href)});`,
+      '}',
+    ].join('\n'),
+  );
+  return {
+    exe: { command: process.execPath, prefixArgs: [file] },
+    aliveAtDownload: () =>
+      existsSync(aliveLog)
+        ? readFileSync(aliveLog, 'utf8')
+            .split('\n')
+            .filter((l) => l !== '')
+            .map((l) => l === 'alive')
+        : [],
+  };
+}
+
+/** Best with no known height: the one download line has the mkv format and is not a height check. */
+function expectMkvFallback(lines: string[][]): void {
+  expect(lines).toHaveLength(1);
+  const download = lastLine(lines);
+  expect(download).not.toContain('-J');
+  expect(valueOf(download, '-f')).toBe('bv*+ba/b');
+  expect(valueOf(download, '--merge-output-format')).toBe('mkv');
+}
+
 const ended = () => events.find((e) => e.type === 'done' || e.type === 'error');
 const probedEvents = () => events.filter((e) => e.type === 'probed');
+const errorEvents = () => events.filter((e) => e.type === 'error');
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'fetchly-media-'));
@@ -571,14 +654,16 @@ describe('MediaEngine height check before a Best download', () => {
     expect(ended()).toMatchObject({ type: 'done' });
   }, 30000);
 
-  it('refuses height information one byte over the output cap', async () => {
+  // Task D, item 4, spec 1 (replaces "refuses height information one byte over the output cap"): over the cap the
+  // height is only a container hint, so the job downloads with no known height instead of failing and being retried.
+  it('downloads with no known height when the height information is one byte over the output cap', async () => {
     makeEngine({}, scriptedProbe(paddedProbe(PROBE_CAP + 1)));
     const lines = argsLog();
     start('ok');
-    expect(await waitFor(ended, 20000)).toMatchObject({ type: 'error', reason: 'could not read the video information', retryable: true });
+    expect(await waitFor(ended, 20000)).toMatchObject({ type: 'done' });
     expect(probedEvents()).toHaveLength(0);
-    await sleep(200);
-    expect(lines()).toHaveLength(0);
+    expect(errorEvents()).toEqual([]);
+    expectMkvFallback(lines());
   }, 30000);
 
   it('stop during the height check starts no download', async () => {
@@ -591,6 +676,289 @@ describe('MediaEngine height check before a Best download', () => {
     expect(events).toEqual([]);
     expect(lines()).toHaveLength(1);
   });
+});
+
+// Task D, item 4 (frozen plan docs/plans/2026-11-23-d-housekeeping.md, "Item 4"). A height check whose output passes
+// the cap ends its child once (killChild) and the job downloads with no known height (mkv, `bv*+ba/b`), whatever the
+// time limit, the exit code or a signal say; a pending stop still wins. The download starts only on the child's
+// 'close'. Specs 2-8 use a 1 KiB cap (`probeOutputCap`), so none of them moves 64 MiB. Amendment 10 makes spec 5 assert the kill
+// order; amendment 11 adds specs 10 and 11 for the failing fallback and the second run (docs/plans/2026-11-23-d-housekeeping-amendment-1.md).
+describe('MediaEngine height check over the output cap (Task D, item 4)', () => {
+  const SMALL_CAP = 1024;
+  const OVER = paddedProbe(SMALL_CAP + 1);
+  /** Waits on a condition; the generous limit only matters when a spec fails. */
+  const LONG = 10_000;
+  const BUDGET = 30_000;
+
+  it('2. the child hangs after cap + 1: it is killed once and has ended before the download starts, and the job is done', async () => {
+    const probe = overCapProbe({ output: OVER, end: 'hang' });
+    makeEngine({ probeOutputCap: SMALL_CAP }, probe.exe);
+    const lines = argsLog();
+    start('ok');
+    await waitFor(() => lines().length === 1, LONG);
+    // Sampled the moment the download line is visible.
+    const child = kills[0];
+    const endedAtDownload = child !== undefined && (child.exitCode !== null || child.signalCode !== null);
+    expect(kills).toHaveLength(1);
+    expect(child?.spawnargs, 'the one kill is the height check').toContain('-J');
+    expect(endedAtDownload, 'the height check had ended before the download line was logged').toBe(true);
+    expect(await waitFor(ended, LONG)).toMatchObject({ type: 'done' });
+    expect(probe.aliveAtDownload()).toEqual([false]);
+    expect(probedEvents()).toHaveLength(0);
+    expect(errorEvents()).toEqual([]);
+    expectMkvFallback(lines());
+    expect(kills, 'no second kill').toHaveLength(1);
+  }, BUDGET);
+
+  it('3. the kill does nothing and the child lives on: no download while it lives, the download once it has exited', async () => {
+    killWorks = false;
+    const release = join(dir, 'release.flag');
+    const probe = overCapProbe({ output: OVER, end: { exit: 0, holdUntil: release } });
+    makeEngine({ probeOutputCap: SMALL_CAP }, probe.exe);
+    const lines = argsLog();
+    start('ok');
+    await waitFor(() => kills.length === 1, LONG);
+    await sleep(250);
+    // The stand-in cannot exit before the file exists, so it lives at this sample whatever the machine's load.
+    const child = kills[0];
+    expect(child?.exitCode).toBeNull();
+    expect(child?.signalCode).toBeNull();
+    expect(lines(), 'no download while the height check lives').toEqual([]);
+    expect(events).toEqual([]);
+    writeFileSync(release, '');
+    expect(await waitFor(ended, LONG)).toMatchObject({ type: 'done' });
+    expect(child?.exitCode, 'it ended by itself').toBe(0);
+    expect(probe.aliveAtDownload(), 'the download began after the height check had ended').toEqual([false]);
+    expect(probedEvents()).toHaveLength(0);
+    expect(errorEvents()).toEqual([]);
+    expectMkvFallback(lines());
+    expect(kills).toHaveLength(1);
+  }, BUDGET);
+
+  it('4. a stop after the cap and before the child ends: no download and no event', async () => {
+    killWorks = false;
+    const probe = overCapProbe({ output: OVER, end: 'hang' });
+    makeEngine({ probeOutputCap: SMALL_CAP }, probe.exe);
+    const lines = argsLog();
+    const job = start('ok');
+    await waitFor(() => kills.length === 1, LONG);
+    expect(lines()).toEqual([]);
+    killWorks = true;
+    await expect(engine.stop(job.id)).resolves.toBeUndefined();
+    expect(events).toEqual([]);
+    await sleep(200);
+    expect(lines()).toEqual([]);
+    expect(events).toEqual([]);
+    expect(probe.aliveAtDownload()).toEqual([]);
+    expect(kills, 'the cap kill, then the stop').toHaveLength(2);
+    expect(kills[1]).toBe(kills[0]);
+  }, BUDGET);
+
+  // Amendment 10 (review finding 2): spec 5 asserts the order. The first kill is the cap kill and comes before the time limit; the
+  // second is the timer's, at or after it, and kills the same child. Elapsed time is the one clock the plan allows here. A red run
+  // on a loaded machine is re-run alone before it counts.
+  it('5. the cap kills first, before the time limit; the timer then kills the same child again; over-cap still wins over the time limit', async () => {
+    const TIME_LIMIT = 3000;
+    killWorks = false;
+    const probe = overCapProbe({ output: OVER, end: 'hang' });
+    makeEngine({ probeOutputCap: SMALL_CAP, probeTimeoutMs: TIME_LIMIT }, probe.exe);
+    const lines = argsLog();
+    const t0 = Date.now();
+    start('ok');
+    await waitFor(() => kills.length >= 1, LONG);
+    const firstKillAfter = Date.now() - t0;
+    expect(kills, 'only the first kill so far').toHaveLength(1);
+    expect(firstKillAfter, 'the first kill is the cap kill: it comes before the time limit').toBeLessThan(TIME_LIMIT);
+    expect(kills[0]?.spawnargs, 'the first kill is the height check').toContain('-J');
+    expect(lines()).toEqual([]);
+    expect(events).toEqual([]);
+    await waitFor(() => kills.length >= 2, LONG);
+    const secondKillAfter = Date.now() - t0;
+    expect(secondKillAfter, 'the second kill is the timer: it comes at or after the time limit').toBeGreaterThanOrEqual(TIME_LIMIT);
+    expect(kills[1], 'the timer kills the same child').toBe(kills[0]);
+    expect(lines()).toEqual([]);
+    expect(events).toEqual([]);
+    kills[0]?.kill(); // the tree finally ends, by hand
+    expect(await waitFor(ended, LONG)).toMatchObject({ type: 'done' });
+    expect(errorEvents(), 'no "timed out reading the link"').toEqual([]);
+    expect(probe.aliveAtDownload()).toEqual([false]);
+    expect(probedEvents()).toHaveLength(0);
+    expectMkvFallback(lines());
+    expect(kills).toHaveLength(2);
+  }, BUDGET);
+
+  // Over-cap wins over the exit code and over a signal: no `login required`, no `could not read ...`, no timeout.
+  it.each<{ name: string; killOn: boolean; end: ProbeEnd; stderr: string; exitCode: number | null; signal: boolean }>([
+    { name: 'the child exits 0 by itself and the kill does nothing', killOn: false, end: { exit: 0 }, stderr: '', exitCode: 0, signal: false },
+    {
+      name: 'the child exits 1 with "ERROR: Sign in" on stderr and the kill does nothing',
+      killOn: false,
+      end: { exit: 1 },
+      stderr: 'ERROR: Sign in\n',
+      exitCode: 1,
+      signal: false,
+    },
+    { name: 'the kill works and the child ends by signal', killOn: true, end: 'hang', stderr: '', exitCode: null, signal: true },
+  ])('6. $name: the job is done with one mkv download', async ({ killOn, end, stderr, exitCode, signal }) => {
+    killWorks = killOn;
+    const probe = overCapProbe({ output: OVER, stderr, end });
+    makeEngine({ probeOutputCap: SMALL_CAP }, probe.exe);
+    const lines = argsLog();
+    start('ok');
+    expect(await waitFor(ended, LONG)).toMatchObject({ type: 'done' });
+    expect(errorEvents(), 'no login required, no unreadable, no timeout').toEqual([]);
+    expect(probedEvents()).toHaveLength(0);
+    expectMkvFallback(lines());
+    expect(probe.aliveAtDownload()).toEqual([false]);
+    expect(kills, 'the cap kill, once').toHaveLength(1);
+    const child = kills[0];
+    expect(child?.exitCode).toBe(exitCode);
+    expect(child?.signalCode !== null, 'ended by a signal').toBe(signal);
+  }, BUDGET);
+
+  it('7. the stream keeps flowing after the cap: 4 MB more are drained and the job is done', async () => {
+    killWorks = false;
+    const probe = overCapProbe({ output: OVER, more: 4 * 1024 * 1024, end: { exit: 0 } });
+    makeEngine({ probeOutputCap: SMALL_CAP }, probe.exe);
+    const lines = argsLog();
+    start('ok');
+    // A parent that stopped reading would block the child on its write and never see it end.
+    expect(await waitFor(ended, LONG)).toMatchObject({ type: 'done' });
+    expect(errorEvents()).toEqual([]);
+    expect(probedEvents()).toHaveLength(0);
+    expectMkvFallback(lines());
+    expect(probe.aliveAtDownload()).toEqual([false]);
+    expect(kills[0]?.exitCode, 'the child wrote everything and ended by itself').toBe(0);
+  }, BUDGET);
+
+  it('8. boundary: output of exactly probeOutputCap bytes is read, with the height and the mp4 format', async () => {
+    const probe = overCapProbe({ output: paddedProbe(SMALL_CAP), end: { exit: 0 } });
+    makeEngine({ probeOutputCap: SMALL_CAP }, probe.exe);
+    const lines = argsLog();
+    const job = start('ok');
+    expect(await waitFor(ended, LONG)).toMatchObject({ type: 'done' });
+    expect(events[0]).toEqual({ jobId: job.id, type: 'probed', sourceHeight: 720 });
+    expect(errorEvents()).toEqual([]);
+    expect(kills, 'under or at the cap nothing is killed').toHaveLength(0);
+    expect(lines()).toHaveLength(1);
+    expect(valueOf(lastLine(lines()), '--merge-output-format')).toBe('mp4');
+  }, BUDGET);
+
+  it('8b. boundary: the cap counts the whole output, so one more byte in a later write is over it', async () => {
+    const probe = overCapProbe({ output: paddedProbe(SMALL_CAP), more: 1, end: { exit: 0 } });
+    makeEngine({ probeOutputCap: SMALL_CAP }, probe.exe);
+    const lines = argsLog();
+    start('ok');
+    expect(await waitFor(ended, LONG)).toMatchObject({ type: 'done' });
+    expect(errorEvents()).toEqual([]);
+    expect(probedEvents()).toHaveLength(0);
+    expectMkvFallback(lines());
+  }, BUDGET);
+
+  it('8c. boundary: a cap of 0 is a cap (not the default): any output is over it', async () => {
+    const probe = overCapProbe({ output: OVER, end: { exit: 0 } });
+    makeEngine({ probeOutputCap: 0 }, probe.exe);
+    const lines = argsLog();
+    start('ok');
+    expect(await waitFor(ended, LONG)).toMatchObject({ type: 'done' });
+    expect(errorEvents()).toEqual([]);
+    expect(probedEvents()).toHaveLength(0);
+    expectMkvFallback(lines());
+  }, BUDGET);
+
+  it('9. kept: output under the cap that cannot be read stays a retryable failure, with no download', async () => {
+    const probe = overCapProbe({ output: 'this is not json', end: { exit: 0 } });
+    makeEngine({ probeOutputCap: SMALL_CAP }, probe.exe);
+    const lines = argsLog();
+    start('ok');
+    expect(await waitFor(ended, LONG)).toMatchObject({ type: 'error', outcome: 'failed', reason: 'could not read the video information', retryable: true });
+    await sleep(200);
+    expect(lines()).toEqual([]);
+    expect(kills).toHaveLength(0);
+  }, BUDGET);
+
+  // Amendment 11 (review finding 3), edge cases of the plan's "Edge cases" list that had no spec.
+  // The fallback download ends with the stand-in's own failure: 'private' (outcome skipped, not retryable). It is not one of the
+  // reasons the height check itself could give (unreadable, time limit, login required), so a mix-up of the two shows.
+  const FALLBACK_FAILURE = { type: 'error', outcome: 'skipped', reason: 'private', retryable: false } as const;
+  // The one job-wide fact both specs rely on: the job is not probed again only when it has data (bytesDone > 0). That counterpart
+  // is covered by 'skips the height check for a job that already has data' in 'MediaEngine height check' above.
+
+  // 3a: the fallback fails. Its own reason is the one error; no probed event, one mkv download line, one kill.
+  it.each<{ name: string; killOn: boolean; end: ProbeEnd; stderr: string }>([
+    { name: 'the kill ends the child by signal', killOn: true, end: 'hang', stderr: '' },
+    { name: 'the child exits 0 by itself and the kill does nothing', killOn: false, end: { exit: 0 }, stderr: '' },
+    {
+      name: 'the child exits 1 with "ERROR: Sign in" on stderr and the kill does nothing',
+      killOn: false,
+      end: { exit: 1 },
+      stderr: 'ERROR: Sign in\n',
+    },
+  ])('10. (amendment 11, 3a) the fallback download fails, $name: its own reason is the one error', async ({ killOn, end, stderr }) => {
+    killWorks = killOn;
+    const probe = overCapProbe({ output: OVER, stderr, end });
+    makeEngine({ probeOutputCap: SMALL_CAP }, probe.exe);
+    const lines = argsLog();
+    const job = start('private');
+    expect(await waitFor(ended, LONG)).toEqual({ jobId: job.id, ...FALLBACK_FAILURE });
+    await sleep(200); // nothing follows the failure
+    // Exactly this one event: not "could not read the video information", "timed out reading the link" or "login required",
+    // no second error, no probed.
+    expect(events).toEqual([{ jobId: job.id, ...FALLBACK_FAILURE }]);
+    expectMkvFallback(lines());
+    expect(probe.aliveAtDownload()).toEqual([false]);
+    expect(kills, 'the cap kill, once').toHaveLength(1);
+    expect(kills[0]?.spawnargs, 'the one kill is the height check').toContain('-J');
+  }, BUDGET);
+
+  it('10b. (amendment 11, 3a) the fallback download fails after the time limit also fired: still its own reason, not "timed out reading the link"', async () => {
+    killWorks = false;
+    const probe = overCapProbe({ output: OVER, end: 'hang' });
+    makeEngine({ probeOutputCap: SMALL_CAP, probeTimeoutMs: 300 }, probe.exe);
+    const lines = argsLog();
+    const job = start('private');
+    await waitFor(() => kills.length >= 2, LONG); // the cap kill and the timer kill; neither ends the child
+    expect(lines()).toEqual([]);
+    kills[0]?.kill(); // the tree finally ends, by hand
+    expect(await waitFor(ended, LONG)).toEqual({ jobId: job.id, ...FALLBACK_FAILURE });
+    await sleep(200);
+    expect(events).toEqual([{ jobId: job.id, ...FALLBACK_FAILURE }]);
+    expectMkvFallback(lines());
+    expect(probe.aliveAtDownload()).toEqual([false]);
+    expect(kills).toHaveLength(2);
+    expect(kills[1]).toBe(kills[0]);
+  }, BUDGET);
+
+  // 3b: a second run of the same job (bytesDone is still 0) is probed again, cut at the cap again and falls back again.
+  it('11. (amendment 11, 3b) a second run with bytesDone 0 spawns a second height check, kills it at the cap, and downloads again with no known height', async () => {
+    const probe = overCapProbe({ output: OVER, end: 'hang' });
+    makeEngine({ probeOutputCap: SMALL_CAP }, probe.exe);
+    const lines = argsLog();
+    const job = start('private');
+    expect(await waitFor(ended, LONG)).toEqual({ jobId: job.id, ...FALLBACK_FAILURE });
+    expect(job.bytesDone, 'the job to run again has no data').toBe(0);
+    expect(job.sourceHeight).toBeNull();
+    expect(kills).toHaveLength(1);
+    expectMkvFallback(lines());
+
+    engine.start(job, ctx); // the same job again, as a re-queue does
+    await waitFor(() => errorEvents().length >= 2, LONG);
+    await sleep(200); // nothing follows the second failure
+    expect(kills, 'one kill for each run').toHaveLength(2);
+    const [first, second] = kills;
+    expect(second, 'a different child from the first').not.toBe(first);
+    expect(second?.pid).not.toBe(first?.pid);
+    expect(first?.spawnargs).toContain('-J');
+    expect(second?.spawnargs, 'the second run spawned its own height check').toContain('-J');
+    expect(probe.aliveAtDownload(), 'each download began after its height check had ended').toEqual([false, false]);
+    const all = lines();
+    expect(all, 'a second download line').toHaveLength(2);
+    for (const line of all) expectMkvFallback([line]);
+    expect(events, 'two failures of its own, no probed').toEqual([
+      { jobId: job.id, ...FALLBACK_FAILURE },
+      { jobId: job.id, ...FALLBACK_FAILURE },
+    ]);
+  }, BUDGET);
 });
 
 describe('MediaEngine stop and discard', () => {

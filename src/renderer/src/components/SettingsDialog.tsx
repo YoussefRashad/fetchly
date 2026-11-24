@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { isLanguageSetting, isThemeSetting } from '../../../shared/i18n';
-import type { BinStatus, PairingsView, ServerStatus, Settings } from '../../../shared/types';
+import type { BinStatus, ErrorInfo, PairingsView, ServerStatus, Settings } from '../../../shared/types';
+import { errorText, settingsOutcome, statusMessage } from '../errors';
 import { S } from '../strings';
 import { decodeQuality, encodeQuality, parseLangs, qualityOptions } from './quality';
 
 interface Props {
   settings: Settings;
   onSaved(s: Settings): void;
+  /** Something to tell after the dialog closed (a save that worked with a warning); App shows it in its banner. */
+  onNotice(info: ErrorInfo): void;
   onClose(): void;
 }
 
@@ -63,7 +66,7 @@ function BrowserPanel({ draftPort }: { draftPort: number }) {
     setError(null);
     const res = await window.fetchly.pairingStart();
     if (!res.ok) {
-      setError(res.error);
+      setError(errorText(res));
     } else {
       const at = performance.now();
       setNow(at);
@@ -81,7 +84,7 @@ function BrowserPanel({ draftPort }: { draftPort: number }) {
   async function unpair(id: string) {
     setError(null);
     const res = await window.fetchly.unpair(id);
-    if (!res.ok) setError(res.error);
+    if (!res.ok) setError(errorText(res));
     refresh();
   }
 
@@ -93,7 +96,7 @@ function BrowserPanel({ draftPort }: { draftPort: number }) {
   if (server === null) line = S.serverChecking;
   else if (server.state === 'listening') line = S.serverListening(server.port);
   else if (server.state === 'portBusy') line = S.serverPortBusy(server.port);
-  else line = server.message;
+  else line = statusMessage(server);
 
   return (
     <>
@@ -150,7 +153,7 @@ function BrowserPanel({ draftPort }: { draftPort: number }) {
   );
 }
 
-export function SettingsDialog({ settings, onSaved, onClose }: Props) {
+export function SettingsDialog({ settings, onSaved, onNotice, onClose }: Props) {
   const [draft, setDraft] = useState(settings);
   const [langs, setLangs] = useState(settings.subtitleLangs.join(', '));
   const [bins, setBins] = useState<BinStatus[]>([]);
@@ -172,8 +175,11 @@ export function SettingsDialog({ settings, onSaved, onClose }: Props) {
   async function save() {
     setError(null);
     const res = await window.fetchly.setSettings({ ...draft, subtitleLangs: parseLangs(langs) });
-    if (!res.ok) return setError(res.error);
-    onSaved(res.value);
+    const { saved, notice, failure } = settingsOutcome(res);
+    if (failure !== null) return setError(errorText(failure));
+    // Saved: the window takes the new settings (and language) first, so App shows the notice in that language.
+    if (saved !== null) onSaved(saved);
+    if (notice !== null) onNotice(notice);
     onClose();
   }
 
@@ -182,7 +188,7 @@ export function SettingsDialog({ settings, onSaved, onClose }: Props) {
     setUpdateNote(null);
     const res = await window.fetchly.updateYtDlp();
     setUpdating(false);
-    setUpdateNote(res.ok ? S.updatedTo(res.value) : res.error);
+    setUpdateNote(res.ok ? S.updatedTo(res.value) : errorText(res));
     void window.fetchly.binaries().then(setBins);
   }
 
