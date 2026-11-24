@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { Group, GroupVerb, Job } from '../../../shared/types';
+import type { ErrorInfo, Group, GroupVerb, Job } from '../../../shared/types';
 import { addedText, addedTitle, formatSpeed, groupSummary } from '../format';
 import { S } from '../strings';
 import { JobRow } from './JobRow';
@@ -10,7 +10,7 @@ interface Props {
   members: Job[];
   /** the members that pass the current filter */
   visible: Job[];
-  onError(message: string): void;
+  onError(info: ErrorInfo): void;
 }
 
 export function GroupRow({ group, members, visible, onError }: Props) {
@@ -25,7 +25,7 @@ export function GroupRow({ group, members, visible, onError }: Props) {
   async function act(verb: GroupVerb) {
     if (verb === 'cancel' && !window.confirm(S.confirmCancelGroup(group.title))) return;
     const res = await window.fetchly.group(group.id, verb);
-    if (!res.ok) onError(res.error);
+    if (!res.ok) onError(res);
   }
 
   return (

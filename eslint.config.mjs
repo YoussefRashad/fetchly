@@ -3,7 +3,18 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   // .ai/ holds project-setup's vendored runtime (git-safe, the raw-Git hook); it must stay byte-identical to the skill.
-  { ignores: ['out/**', 'dist/**', 'node_modules/**', '.superpowers/**', '.remember/**', '.e2e-real/**', '.ai/**'] },
+  {
+    ignores: [
+      'out/**',
+      'dist/**',
+      'node_modules/**',
+      '.superpowers/**',
+      '.remember/**',
+      '.e2e-real/**',
+      'extension/dist/**',
+      '.ai/**',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

@@ -34,3 +34,8 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+      - run: npm run build:ext
+      # Packs the portable exe once, so a packaging break shows up here. Nothing is uploaded or published.
+      - name: Package the portable exe
+        if: matrix.node == 24
+        run: npm run dist:portable

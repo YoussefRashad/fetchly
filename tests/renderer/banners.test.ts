@@ -1,7 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { banners } from '../../src/renderer/src/banners';
+import { setLanguage } from '../../src/renderer/src/strings';
+import { fsi } from '../../src/shared/i18n';
 import type { AppStatus, EngineStatus, Job, JobState, Snapshot } from '../../src/shared/types';
+import { DETAIL, FIXED } from '../errorTable';
 import { makeJob } from '../helpers';
+
+afterEach(() => setLanguage('en'));
 
 const CUT_OFF_TEXT =
   'Some downloads were cut off and Fetchly could not check that their old processes are gone. End yt-dlp, ffmpeg and aria2c in Task Manager, then confirm.';
@@ -112,5 +117,94 @@ describe('banners', () => {
       'cutOff',
     ]);
     expect(banners(status(READY, 'y'), snap([makeJob({ state: 'paused', interrupted: true })])).map((b) => b.id)).toEqual(['save', 'cutOff']);
+  });
+});
+
+// Task D, item 2: the engine and save banners show the text of the language in use. A status object holds the English
+// `message` and a `code`; the window shows S.errors[code] (statusMessage), and the English text of a coded status is
+// the message itself, so the English banners above did not change.
+describe('translated banners (Task D, item 2)', () => {
+  const ENGINE_TEXT = 'The file download service stopped';
+
+  it('a coded engine error: the message in English, the translation in Arabic, the button unchanged', () => {
+    const engine: EngineStatus = { state: 'error', message: ENGINE_TEXT, code: 'fileServiceStopped' };
+    expect(banners(status(engine), snap())).toEqual([{ id: 'engine', text: ENGINE_TEXT, action: 'retryEngines' }]);
+    setLanguage('ar');
+    expect(banners(status(engine), snap())).toEqual([{ id: 'engine', text: 'توقفت خدمة تنزيل الملفات', action: 'retryEngines' }]);
+  });
+
+  it('the start error carries its detail, isolated once in Arabic', () => {
+    const engine: EngineStatus = {
+      state: 'error',
+      message: 'The download tools could not be started: spawn aria2c ENOENT',
+      code: 'toolsStartFailed',
+      detail: 'spawn aria2c ENOENT',
+    };
+    expect(banners(status(engine), snap())).toEqual([
+      { id: 'engine', text: 'The download tools could not be started: spawn aria2c ENOENT', action: 'retryEngines' },
+    ]);
+    setLanguage('ar');
+    expect(banners(status(engine), snap())).toEqual([
+      { id: 'engine', text: `تعذّر تشغيل أدوات التنزيل: ${fsi('spawn aria2c ENOENT')}`, action: 'retryEngines' },
+    ]);
+  });
+
+  it('an engine error without a code: English as it came, Arabic the same text inside one isolate', () => {
+    const engine: EngineStatus = { state: 'error', message: 'something no table knows' };
+    expect(banners(status(engine), snap())).toEqual([{ id: 'engine', text: 'something no table knows', action: 'retryEngines' }]);
+    setLanguage('ar');
+    expect(banners(status(engine), snap())).toEqual([{ id: 'engine', text: fsi('something no table knows'), action: 'retryEngines' }]);
+  });
+
+  it('a start error whose detail is missing falls back to the message as it came', () => {
+    const engine = { state: 'error', message: 'The download tools could not be started: x', code: 'toolsStartFailed' } as EngineStatus;
+    setLanguage('ar');
+    expect(banners(status(engine), snap())).toEqual([{ id: 'engine', text: fsi('The download tools could not be started: x'), action: 'retryEngines' }]);
+  });
+
+  it('an unknown code on an engine error falls back to the message as it came', () => {
+    const engine = { state: 'error', message: 'MESSAGE-AS-SENT', code: 'constructor' } as unknown as EngineStatus;
+    expect(banners(status(engine), snap())[0]?.text).toBe('MESSAGE-AS-SENT');
+    setLanguage('ar');
+    expect(banners(status(engine), snap())[0]?.text).toBe(fsi('MESSAGE-AS-SENT'));
+  });
+
+  it('the save banner translates a save error that starts with the English prefix', () => {
+    const text = 'could not save the download list: EACCES: permission denied';
+    expect(banners(status(READY, text), snap())).toEqual([{ id: 'save', text, action: null }]);
+    setLanguage('ar');
+    expect(banners(status(READY, text), snap())).toEqual([
+      { id: 'save', text: `تعذّر حفظ قائمة التنزيلات: ${fsi('EACCES: permission denied')}`, action: null },
+    ]);
+  });
+
+  it('a save error without the prefix: English as it came, Arabic the same text inside one isolate', () => {
+    expect(banners(status(READY, 'disk full'), snap())).toEqual([{ id: 'save', text: 'disk full', action: null }]);
+    setLanguage('ar');
+    expect(banners(status(READY, 'disk full'), snap())).toEqual([{ id: 'save', text: fsi('disk full'), action: null }]);
+  });
+
+  it('the banners of one status follow the language at every call', () => {
+    const engine: EngineStatus = { state: 'error', message: ENGINE_TEXT, code: 'fileServiceStopped' };
+    const texts: string[] = [];
+    for (const lang of ['en', 'ar', 'en'] as const) {
+      setLanguage(lang);
+      texts.push(banners(status(engine), snap())[0]?.text ?? '');
+    }
+    expect(texts).toEqual([ENGINE_TEXT, 'توقفت خدمة تنزيل الملفات', ENGINE_TEXT]);
+  });
+
+  it.each(FIXED)('an engine error with the fixed code %s shows its translation', (code, en, ar) => {
+    const engine = { state: 'error', message: 'MESSAGE-AS-SENT', code } as EngineStatus;
+    expect(banners(status(engine), snap())[0]?.text).toBe(en);
+    setLanguage('ar');
+    expect(banners(status(engine), snap())[0]?.text).toBe(ar);
+  });
+
+  it.each(DETAIL)('an engine error with the detail code %s shows its translation', (code, en, ar) => {
+    const engine = { state: 'error', message: 'MESSAGE-AS-SENT', code, detail: 'D-1' } as EngineStatus;
+    expect(banners(status(engine), snap())[0]?.text).toBe(en('D-1'));
+    setLanguage('ar');
+    expect(banners(status(engine), snap())[0]?.text).toBe(ar('D-1'));
   });
 });

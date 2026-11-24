@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { ERROR_TEXT, type CodeOfKind } from '../shared/errors';
 import { isLanguageSetting, isThemeSetting } from '../shared/i18n';
 import {
   type AddRequest,
@@ -8,6 +9,7 @@ import {
   type BinStatus,
   type EngineStatus,
   type EntryReason,
+  type ErrorInfo,
   type GroupVerb,
   type JobVerb,
   type PlaylistEntry,
@@ -25,7 +27,7 @@ import { normalizeSettings } from './jobs/store';
 import { copyQuality, everyPosition, isAbsoluteDir, isLangList, isQuality } from './jobs/validate';
 import { sanitizeFileName } from './naming';
 import { InvalidUrl, ProbeError } from './probe';
-import { NOT_LISTENING_TEXT, type PairingStore } from './server/pairing';
+import { FOUR_PAIRED_TEXT, NOT_LISTENING_TEXT, type PairingStore } from './server/pairing';
 import type { RunningServer } from './server/server';
 import { MAX_HEIGHTS } from './ytdlp/parse';
 
@@ -75,35 +77,55 @@ export interface HandlerDeps {
 
 const JOB_VERBS: readonly string[] = ['pause', 'resume', 'cancel', 'retry', 'remove', 'removeWithFile'];
 const GROUP_VERBS: readonly string[] = ['pause', 'resume', 'cancel'];
-const BAD_REQUEST = 'That request is not valid';
-const PORT_TEXT = 'Port must be a whole number from 1024 to 65535';
-const PORT_DECLINED_TEXT = 'Settings were not saved: the port was not changed';
-const SAVING_TEXT = 'Settings are being saved';
-const NOT_PAIRED_TEXT = 'This browser is not paired';
-const UNPAIR_UNSAVED_TEXT = 'Unpaired, but the change is not saved yet; Fetchly keeps trying';
 
-/** The engine status in words: why a handler that needs the queue cannot run, or why a start did not work. */
-function statusText(engine: EngineStatus): string {
-  if (engine.state === 'notInstalled') return 'Install the download tools first';
-  if (engine.state === 'error') return engine.message;
+/** A fixed code with its English text. */
+const fixed = (code: CodeOfKind<'fixed'>): ErrorInfo => ({ error: ERROR_TEXT[code], code });
+
+/**
+ * The engine status as an ErrorInfo: why a handler that needs the queue cannot run, or why a start did not work.
+ * An error status passes on its message, and its code and detail when it has them.
+ */
+function statusText(engine: EngineStatus): ErrorInfo {
+  if (engine.state === 'notInstalled') return fixed('toolsNotInstalled');
+  if (engine.state === 'error') {
+    const info: ErrorInfo = { error: engine.message };
+    if (engine.code !== undefined) info.code = engine.code;
+    if (engine.detail !== undefined) info.detail = engine.detail;
+    return info;
+  }
   // 'ready' always comes with a queue, so only 'starting' really reaches this line.
-  return 'The download tools are still starting';
+  return fixed('toolsStarting');
 }
 
 /** C3: a link that, trimmed, still holds a control character never reaches the queue or a spawn. */
 const hasControl = (url: string): boolean => CONTROL.test(url.trim());
 
 const ok = <T>(value: T): Result<T> => ({ ok: true, value });
-const fail = (error: string): Result<never> => ({ ok: false, error });
+/** A failed Result: a fixed code, or an ErrorInfo built elsewhere (its code and detail are kept as they are). */
+const fail = (why: CodeOfKind<'fixed'> | ErrorInfo): Result<never> => ({ ok: false, ...(typeof why === 'string' ? fixed(why) : why) });
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null;
 }
 
-function describe(e: unknown): string {
-  if (e instanceof InvalidUrl) return 'Enter a link that starts with http:// or https://';
-  if (e instanceof ProbeError) return e.reason;
-  return `Something went wrong: ${e instanceof Error ? e.message : String(e)}`;
+const messageOf = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/** What was thrown, as an ErrorInfo: a bad link, a reason of the link probe (linkProblem), or anything else (unexpected). */
+function describe(e: unknown): ErrorInfo {
+  if (e instanceof InvalidUrl) return fixed('invalidLink');
+  if (e instanceof ProbeError) return { error: e.reason, code: 'linkProblem' };
+  const detail = messageOf(e);
+  return { error: ERROR_TEXT.unexpected(detail), code: 'unexpected', detail };
+}
+
+/**
+ * The refusal of the pairing store as a failure. pairing.ts is not coded (D2.5): its two refusal texts are matched by
+ * value; any other text is passed on with no code.
+ */
+function pairingRefusal(error: string): Result<never> {
+  if (error === FOUR_PAIRED_TEXT) return fail('fourPaired');
+  if (error === NOT_LISTENING_TEXT) return fail('notListening');
+  return { ok: false, error };
 }
 
 /** Runs a handler body and turns anything thrown into a Result, so nothing throws across IPC. */
@@ -199,23 +221,23 @@ export function createHandlers(deps: HandlerDeps) {
   return {
     probe: (raw: string): Promise<Result<ProbeResult>> =>
       guarded(async () => {
-        if (typeof raw !== 'string') return fail(describe(new InvalidUrl()));
+        if (typeof raw !== 'string') return fail('invalidLink');
         return ok(await deps.probe(linkOf(raw)));
       }),
 
     add: (req: AddRequest): Promise<Result<null>> =>
       guarded(async () => {
-        if (!isObject(req) || typeof req.url !== 'string') return fail(BAD_REQUEST);
+        if (!isObject(req) || typeof req.url !== 'string') return fail('badRequest');
         const queue = deps.queue();
         if (!queue) return noQueue();
 
         const url = linkOf(req.url);
-        if (!validProbe(req.probe, deps.validateUrl)) return fail(BAD_REQUEST);
-        if (!isAbsoluteDir(req.dir)) return fail('Choose a download folder');
-        if (!isLangList(req.subtitleLangs)) return fail('Subtitle languages must be codes like en or ar');
+        if (!validProbe(req.probe, deps.validateUrl)) return fail('badRequest');
+        if (!isAbsoluteDir(req.dir)) return fail('chooseFolder');
+        if (!isLangList(req.subtitleLangs)) return fail('subtitleLangs');
         let quality: Quality | null = null;
         if (req.probe.kind !== 'file') {
-          if (!isQuality(req.quality)) return fail(BAD_REQUEST);
+          if (!isQuality(req.quality)) return fail('badRequest');
           // Rebuilt from its declared fields, so nothing else reaches the next save (C2).
           quality = copyQuality(req.quality);
         }
@@ -225,15 +247,15 @@ export function createHandlers(deps: HandlerDeps) {
           const available = new Set(req.probe.entries.filter((e) => !e.unavailable).map((e) => e.index));
           const wanted = req.selectedIndexes ?? [...available];
           // One position at a time, so a hole fails instead of being skipped.
-          if (!Array.isArray(wanted) || !everyPosition(wanted, (i) => typeof i === 'number' && available.has(i))) return fail(BAD_REQUEST);
-          if (wanted.length === 0) return fail('Select at least one item');
+          if (!Array.isArray(wanted) || !everyPosition(wanted, (i) => typeof i === 'number' && available.has(i))) return fail('badRequest');
+          if (wanted.length === 0) return fail('selectOne');
           selected = wanted;
         }
 
         try {
           mkdirSync(req.dir, { recursive: true });
         } catch {
-          return fail('cannot write to folder');
+          return fail('cannotWriteFolder');
         }
         queue.add({
           url,
@@ -248,7 +270,7 @@ export function createHandlers(deps: HandlerDeps) {
 
     job: (id: string, verb: JobVerb): Promise<Result<null>> =>
       guarded(async () => {
-        if (typeof id !== 'string' || !JOB_VERBS.includes(verb)) return fail(BAD_REQUEST);
+        if (typeof id !== 'string' || !JOB_VERBS.includes(verb)) return fail('badRequest');
         const queue = deps.queue();
         if (!queue) return noQueue();
         return queue.job(id, verb);
@@ -256,7 +278,7 @@ export function createHandlers(deps: HandlerDeps) {
 
     group: (id: string, verb: GroupVerb): Promise<Result<null>> =>
       guarded(async () => {
-        if (typeof id !== 'string' || !GROUP_VERBS.includes(verb)) return fail(BAD_REQUEST);
+        if (typeof id !== 'string' || !GROUP_VERBS.includes(verb)) return fail('badRequest');
         const queue = deps.queue();
         if (!queue) return noQueue();
         return queue.group(id, verb);
@@ -288,22 +310,23 @@ export function createHandlers(deps: HandlerDeps) {
      * Saves the settings. A serverPort other than the port of the last `ensure` that resolved (the listener is on
      * no other port) removes every pairing (after a confirmation when there are any, S15): the code is cancelled
      * and the pairings emptied before the save, and the listener moves after it. A port counts as moved only once
-     * `ensure` resolved for it, whatever the status; if the save or the queue throws first, retrying that port is
-     * still a new port. The same port still calls ensure, so saving retries a busy or failed listener. One call at
-     * a time.
+     * `ensure` resolved for it, whatever the status; if the save throws, nothing after it runs and retrying that
+     * port is still a new port. A queue that throws after the save does not stop the move: the listener still
+     * moves, and the answer is ok with the warning `savedNotApplied`. The same port still calls ensure, so saving
+     * retries a busy or failed listener. One call at a time.
      */
     setSettings: async (s: Settings): Promise<Result<Settings>> => {
-      if (settingsBusy) return fail(SAVING_TEXT);
+      if (settingsBusy) return fail('settingsBusy');
       settingsBusy = true;
       try {
         return await guarded(async () => {
-          if (!isObject(s)) return fail(BAD_REQUEST);
-          if (!isLanguageSetting(s.language) || !isThemeSetting(s.theme)) return fail(BAD_REQUEST);
-          if (!isAbsoluteDir(s.downloadDir)) return fail('Choose a download folder');
-          if (!isQuality(s.defaultQuality)) return fail(BAD_REQUEST);
-          if (!isLangList(s.subtitleLangs)) return fail('Subtitle languages must be codes like en or ar');
+          if (!isObject(s)) return fail('badRequest');
+          if (!isLanguageSetting(s.language) || !isThemeSetting(s.theme)) return fail('badRequest');
+          if (!isAbsoluteDir(s.downloadDir)) return fail('chooseFolder');
+          if (!isQuality(s.defaultQuality)) return fail('badRequest');
+          if (!isLangList(s.subtitleLangs)) return fail('subtitleLangs');
           // Tested as given, with no Number(...) coercion: "38917" is not a port (S14).
-          if (!isServerPort(s.serverPort)) return fail(PORT_TEXT);
+          if (!isServerPort(s.serverPort)) return fail('portInvalid');
           const next = normalizeSettings({
             language: s.language,
             theme: s.theme,
@@ -320,17 +343,25 @@ export function createHandlers(deps: HandlerDeps) {
           });
           if (next.serverPort !== listenerPort) {
             const count = deps.pairing.list().length;
-            if (count > 0 && !(await deps.confirmPortChange(count))) return fail(PORT_DECLINED_TEXT);
+            if (count > 0 && !(await deps.confirmPortChange(count))) return fail('portChangeDeclined');
             // One synchronous block: the old pairing string dies, the pairings go (written even when the list
             // was already empty, R2-1), then the save. If the save throws, the listener is not moved.
             deps.pairing.cancel();
             deps.pairing.clear();
           }
           deps.saveSettings(next);
-          deps.queue()?.setSettings(next);
+          // The settings are saved: a queue that refuses them must not keep the listener on the old port (D3.1).
+          let warning: ErrorInfo | null = null;
+          try {
+            deps.queue()?.setSettings(next);
+          } catch (e) {
+            const detail = messageOf(e);
+            warning = { error: ERROR_TEXT.savedNotApplied(detail), code: 'savedNotApplied', detail };
+          }
+          // An ensure that rejects (a contract breach) fails the call and drops the warning (D3.6).
           await deps.server.ensure(next.serverPort);
           listenerPort = next.serverPort;
-          return ok(next);
+          return warning === null ? ok(next) : { ok: true, value: next, warning };
         });
       } finally {
         settingsBusy = false;
@@ -341,9 +372,9 @@ export function createHandlers(deps: HandlerDeps) {
     pairingStart: (): Promise<Result<{ pairingString: string; lifetimeMs: number }>> =>
       guarded(async () => {
         const server = deps.server.status();
-        if (server.state !== 'listening') return fail(NOT_LISTENING_TEXT);
+        if (server.state !== 'listening') return fail('notListening');
         const opened = deps.pairing.open();
-        if (!opened.ok) return fail(opened.error);
+        if (!opened.ok) return pairingRefusal(opened.error);
         return ok({ pairingString: formatPairingString(server.port, opened.value.code), lifetimeMs: opened.value.lifetimeMs });
       }),
 
@@ -359,9 +390,9 @@ export function createHandlers(deps: HandlerDeps) {
     /** Revokes at once; a failed write is retried, and the answer says so. */
     unpair: (id: string): Promise<Result<null>> =>
       guarded(async () => {
-        if (typeof id !== 'string') return fail(BAD_REQUEST);
-        if (!deps.pairing.unpair(id)) return fail(NOT_PAIRED_TEXT);
-        if (deps.pairing.view().unsaved) return fail(UNPAIR_UNSAVED_TEXT);
+        if (typeof id !== 'string') return fail('badRequest');
+        if (!deps.pairing.unpair(id)) return fail('notPaired');
+        if (deps.pairing.view().unsaved) return fail('unpairUnsaved');
         return ok(null);
       }),
 
@@ -371,9 +402,9 @@ export function createHandlers(deps: HandlerDeps) {
     openFile: (jobId: string): Promise<Result<null>> =>
       guarded(async () => {
         const job = deps.queue()?.snapshot().jobs.find((j) => j.id === jobId);
-        if (!job || job.state !== 'done' || job.fileName === null) return fail('This download is not finished');
+        if (!job || job.state !== 'done' || job.fileName === null) return fail('notFinished');
         const path = join(job.dir, job.fileName);
-        if (!existsSync(path)) return fail('The file is no longer there');
+        if (!existsSync(path)) return fail('fileGone');
         // A program, shortcut, script or disk image runs only after the user says yes.
         if (isRunnableFile(job.fileName) && !(await deps.confirmOpenRunnable(job.fileName))) return ok(null);
         await deps.openPath(path);
@@ -383,13 +414,13 @@ export function createHandlers(deps: HandlerDeps) {
     openFolder: (jobId: string): Promise<Result<null>> =>
       guarded(async () => {
         const job = deps.queue()?.snapshot().jobs.find((j) => j.id === jobId);
-        if (!job) return fail(BAD_REQUEST);
+        if (!job) return fail('badRequest');
         const file = job.state === 'done' && job.fileName !== null ? join(job.dir, job.fileName) : null;
         if (file !== null && existsSync(file)) {
           deps.showItem(file);
           return ok(null);
         }
-        if (!existsSync(job.dir)) return fail('The folder is no longer there');
+        if (!existsSync(job.dir)) return fail('folderGone');
         await deps.openPath(job.dir);
         return ok(null);
       }),
@@ -403,10 +434,10 @@ export function createHandlers(deps: HandlerDeps) {
           await deps.afterInstall();
           // The tools are in place; a start that did not work is told, not hidden.
           const { engine } = deps.status();
-          return engine.state === 'error' ? fail(engine.message) : ok(null);
+          return engine.state === 'error' ? fail(statusText(engine)) : ok(null);
         } catch (e) {
-          // Install errors are already written for people ("could not download ffmpeg: …").
-          return fail(e instanceof Error ? e.message : String(e));
+          // Install errors are already written for people ("could not download ffmpeg: …"); they stay English, no code.
+          return fail({ error: messageOf(e) });
         }
       })(),
 
@@ -415,7 +446,7 @@ export function createHandlers(deps: HandlerDeps) {
         try {
           return ok(await deps.binaries.updateYtDlp());
         } catch (e) {
-          return fail(e instanceof Error ? e.message : String(e));
+          return fail({ error: messageOf(e) });
         }
       })(),
 

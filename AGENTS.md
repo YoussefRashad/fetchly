@@ -8,8 +8,9 @@ database and no hosted API. The repository is public.
 
 Stack (from manifests, not guessed): Electron 45.4.1, React 19.3.1, TypeScript 6.0.3 (`strict`,
 `noUncheckedIndexedAccess`), electron-vite 6.0.0, Vite 8.3.8, Vitest 5.1.1, ESLint 10.15.0 with typescript-eslint,
-yauzl 3, playwright-core 1.49.1 (opt-in real-app checks only). Extension: `extension/` (MV3), built with
-`npm run build:ext`; it is on the `feat/phase2-*` branches and not yet on `main`.
+yauzl 3, playwright-core 1.49.1 (opt-in real-app checks only). Extension: `extension/` (Chrome/Edge MV3,
+`manifest.json`, `src/service-worker.ts`, `src/popup.ts`, `src/lib/*`), type-checked with `tsconfig.ext.json` and
+built with `npm run build:ext` into `extension/dist/`.
 Package manager: npm (`package-lock.json`) · Runtime: Node.js 22 or newer (CI runs 22 and 24 on `windows-latest`)
 <!-- project-setup:end id=overview -->
 
@@ -45,8 +46,9 @@ Package manager: npm (`package-lock.json`) · Runtime: Node.js 22 or newer (CI r
   reviews it before commit. See `docs/persistence.md` and `src/main/jobs/AGENTS.md`.
 - No retry without proven idempotency. Downloads resume from partial data; see `docs/integrations/`.
 - Every user-facing string exists in English and Arabic (`src/renderer/src/strings.ts` + `strings.ar.ts`,
-  `src/main/shellStrings.ts`). Arabic says تنزيل for download, never تحميل, and uses Western digits (0-9) only.
-  `tests/renderer/strings.test.ts` enforces both.
+  `src/main/shellStrings.ts`, and the extension's `extension/src/lib/strings.ts`). Arabic says تنزيل for download,
+  never تحميل, and uses Western digits (0-9) only. `tests/renderer/strings.test.ts` and
+  `tests/extension/strings.test.ts` enforce them.
 - Frozen plans are never edited: `docs/plans/**` and `docs/superpowers/plans/**`. Living docs are `README.md`, the
   manual checklists (`docs/manual-checklist-*.md`) and the files under `.ai/context/` and `docs/`.
 - Protected (DRM) content is out of scope: never add decryption or key extraction (`.ai/decisions/003-no-drm.md`).
@@ -67,13 +69,13 @@ Package manager: npm (`package-lock.json`) · Runtime: Node.js 22 or newer (CI r
 <!-- project-setup:begin id=commands -->
 ## Commands
 
-Gates (run all before a commit; CI runs the first four on every push and pull request):
+Gates (run all before a commit; CI runs typecheck, lint, the full suite, build and build:ext):
 
-- `npm run typecheck`: `tsc --noEmit` for `tsconfig.node.json` and `tsconfig.web.json`.
+- `npm run typecheck`: `tsc --noEmit` for `tsconfig.node.json`, `tsconfig.web.json` and `tsconfig.ext.json`.
 - `npm run lint`: ESLint over the repository.
 - `npx vitest run <spec files>`: the specs you touched. No network, no real tools.
 - `npm run build`: electron-vite build of main, preload and renderer into `out/`.
-- `npm run build:ext`: builds the extension. Only where `extension/` exists (the Phase 2 branches until merged).
+- `npm run build:ext`: Vite build of the extension (`extension/vite.config.mjs`) into `extension/dist/`.
 - `npx vitest run` (full suite, same as `npm test`): only under the shared suite lock. One full-suite or
   real-app run per machine at a time: timing-sensitive specs (child processes, deadlines) fail under load.
   Take the lock by creating `.fetchly-suite.lock` in the parent directory of the main clone with an exclusive

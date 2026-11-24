@@ -9,8 +9,9 @@ const SERVICE_STOPPED = 'The file download service stopped';
 const STARTING: EngineStatus = { state: 'starting' };
 const READY: EngineStatus = { state: 'ready' };
 const NOT_INSTALLED: EngineStatus = { state: 'notInstalled' };
-const failed = (message: string): EngineStatus => ({ state: 'error', message: `${COULD_NOT_START}${message}` });
-const stopped: EngineStatus = { state: 'error', message: SERVICE_STOPPED };
+/** The start failure of the host: the English message of today, the code toolsStartFailed, and the raw message as its detail. */
+const failed = (message: string): EngineStatus => ({ state: 'error', message: `${COULD_NOT_START}${message}`, code: 'toolsStartFailed', detail: message });
+const stopped: EngineStatus = { state: 'error', message: SERVICE_STOPPED, code: 'fileServiceStopped' };
 
 /** Lets every promise that can settle without a timer settle. */
 const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
@@ -308,7 +309,13 @@ describe('EngineHost (9.2)', () => {
     h.control.starts = [new Error('spawn aria2c ENOENT')];
     await expect(h.host.start()).resolves.toBeUndefined();
     expect(h.host.status()).toEqual(failed('spawn aria2c ENOENT'));
-    expect(h.host.status()).toEqual({ state: 'error', message: 'The download tools could not be started: spawn aria2c ENOENT' });
+    // toolsStartFailed: the English message unchanged, the code, and the raw error message as the detail.
+    expect(h.host.status()).toEqual({
+      state: 'error',
+      message: 'The download tools could not be started: spawn aria2c ENOENT',
+      code: 'toolsStartFailed',
+      detail: 'spawn aria2c ENOENT',
+    });
     expect(h.host.queue()).toBeNull();
     expect(h.host.daemon()).toBeNull(); // no aria2 was ever started
     expect(h.calls('createQueue')).toBe(0);
@@ -761,7 +768,8 @@ describe('EngineHost: aria2 exits while running (9.4)', () => {
     const queue = h.host.queue();
     h.daemons[0]?.die();
     expect(h.host.status()).toEqual(stopped);
-    expect(h.host.status()).toEqual({ state: 'error', message: 'The file download service stopped' });
+    // fileServiceStopped: the English message unchanged, and the code.
+    expect(h.host.status()).toEqual({ state: 'error', message: 'The file download service stopped', code: 'fileServiceStopped' });
     expect(h.host.queue()).toBe(queue);
     expect(h.host.queue()).not.toBeNull();
     expect(h.host.daemon()).toBe(h.daemons[0]); // still there for quit

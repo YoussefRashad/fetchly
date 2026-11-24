@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { BinName } from '../../../shared/types';
+import { errorText } from '../errors';
 import { S } from '../strings';
 
 interface Props {
@@ -19,7 +20,7 @@ export function InstallScreen({ onInstalled }: Props) {
     const res = await window.fetchly.installBinaries();
     setBusy(false);
     if (res.ok) onInstalled();
-    else setError(res.error);
+    else setError(errorText(res));
   }
 
   return (

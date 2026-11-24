@@ -7,6 +7,7 @@ import { InstallScreen } from './components/InstallScreen';
 import { JobList } from './components/JobList';
 import { SettingsDialog } from './components/SettingsDialog';
 import { UrlBar } from './components/UrlBar';
+import { noticeText, type Notice } from './errors';
 import { formatSpeed, type Filter } from './format';
 import { S, setLanguage } from './strings';
 
@@ -19,7 +20,8 @@ export function App() {
   const [filter, setFilter] = useState<Filter>('all');
   const [adding, setAdding] = useState<{ url: string; probe: ProbeResult } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
+  // A value, not text: an ErrorInfo is translated at render, so it follows a language change (C3).
+  const [message, setMessage] = useState<Notice | null>(null);
   const [pending, setPending] = useState<BannerAction | null>(null);
 
   // The language is known once the settings are; everything below reads S in it.
@@ -55,7 +57,7 @@ export function App() {
     setPending(action);
     try {
       const res = await window.fetchly[action]();
-      if (!res.ok) setMessage(res.error);
+      if (!res.ok) setMessage(res);
     } finally {
       setPending(null);
     }
@@ -105,7 +107,7 @@ export function App() {
 
       {message && (
         <p className="banner" role="status">
-          <span>{message}</span>
+          <span>{noticeText(message)}</span>
           <button type="button" onClick={() => setMessage(null)} aria-label={S.close}>
             ✕
           </button>
@@ -117,7 +119,7 @@ export function App() {
       </main>
 
       {adding && <AddDialog url={adding.url} probe={adding.probe} settings={settings} onClose={() => setAdding(null)} />}
-      {showSettings && <SettingsDialog settings={settings} onSaved={setSettings} onClose={() => setShowSettings(false)} />}
+      {showSettings && <SettingsDialog settings={settings} onSaved={setSettings} onNotice={setMessage} onClose={() => setShowSettings(false)} />}
     </div>
   );
 }

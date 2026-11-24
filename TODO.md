@@ -14,9 +14,9 @@
 ## Missing Information
 <!-- Could not be inferred from code. -->
 
-- Extension: `extension/` is not on `main` yet. After the Phase 2 branches merge, re-run project-setup to add an
-  `extension/AGENTS.md` + `extension/CLAUDE.md` pair (rules for `extension/src/**`), document the extension in
-  `.ai/context/` and `docs/api-conventions.md`, and confirm `npm run build:ext` in the Commands block.
+- Extension: `extension/` is on `main` (A2) and listed in AGENTS.md, the gates and the sensitive areas. Still to
+  do: re-run project-setup (update) to add an `extension/AGENTS.md` + `extension/CLAUDE.md` pair (rules for
+  `extension/src/**`) and document the extension's side of the protocol in `docs/api-conventions.md`.
 - `/v1/hello`: the server stores no nonces and checks no timestamp; the nonce is chosen by the client. Confirm this
   is intended (the proof binds the port and the client checks freshness) and record it in ADR-004 if so.
 - `docs/observability.md` was not generated: the app has no logger and one log line. Confirm that is the intended

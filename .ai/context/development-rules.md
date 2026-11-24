@@ -4,9 +4,9 @@
 
 - Change only what the task needs. Note unrelated problems in `TODO.md` or the task report instead of fixing them.
 - Reuse the patterns in `code-patterns.md`.
-- Keep the gates green: `npm run typecheck`, `npm run lint`, the specs you touched, `npm run build` (and
-  `npm run build:ext` where `extension/` exists). ESLint config: `eslint.config.mjs`; TypeScript is `strict` with
-  `noUncheckedIndexedAccess` in both `tsconfig.node.json` and `tsconfig.web.json`.
+- Keep the gates green: `npm run typecheck`, `npm run lint`, the specs you touched, `npm run build` and
+  `npm run build:ext`. ESLint config: `eslint.config.mjs`; TypeScript is `strict` with `noUncheckedIndexedAccess`
+  in `tsconfig.node.json`, `tsconfig.web.json` and `tsconfig.ext.json`.
 - Windows is the only target platform. Paths in persisted files and settings are Windows paths.
 
 ## Backward compatibility

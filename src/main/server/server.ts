@@ -11,6 +11,7 @@ import type { Duplex } from 'node:stream';
 import { TextDecoder } from 'node:util';
 import { performance } from 'node:perf_hooks';
 import { BODY_LIMIT, ORIGIN_RE, type ErrorToken } from '../../shared/protocol';
+import { ERROR_TEXT } from '../../shared/errors';
 import type { ServerStatus } from '../../shared/types';
 import type { Pairing, PairingStore } from './pairing';
 import { lookup, type Reply } from './routes';
@@ -55,11 +56,13 @@ const MAX_CONNECTIONS = 16;
 const LISTEN_DEADLINE_MS = 3000;
 const LINGER_MS = 1000;
 
-const START_FAILED_TEXT = 'The browser connection could not start; save Settings to try again';
-const BROKEN_TEXT = 'The browser connection stopped working; save Settings to start it again';
-const STARTING_TEXT = 'The browser connection is starting';
-const STOPPED_TEXT = 'The browser connection is stopped';
-const accessText = (port: number): string => `port ${port} cannot be used on this PC; choose another in Settings`;
+/** The error statuses: the English text of ERROR_TEXT and its code. Copied at each use (`{ ...X }`). */
+const START_FAILED: ServerStatus = { state: 'error', message: ERROR_TEXT.serverStartFailed, code: 'serverStartFailed' };
+const BROKEN: ServerStatus = { state: 'error', message: ERROR_TEXT.serverBroken, code: 'serverBroken' };
+const STARTING: ServerStatus = { state: 'error', message: ERROR_TEXT.serverStarting, code: 'serverStarting' };
+const STOPPED: ServerStatus = { state: 'error', message: ERROR_TEXT.serverStopped, code: 'serverStopped' };
+/** EACCES on `port`: the port travels next to the code, so the window can name it in its own language. */
+const unusable = (port: number): ServerStatus => ({ state: 'error', message: ERROR_TEXT.portUnusable(port), code: 'portUnusable', port });
 
 const JSON_TYPES: ReadonlySet<string> = new Set(['application/json', 'application/json; charset=utf-8']);
 /** Fatal on invalid UTF-8; a BOM is kept, so it fails JSON.parse (S19). */
@@ -275,9 +278,19 @@ interface Attempt {
   server: http.Server | null;
 }
 
+/**
+ * The status of a listen that failed on `requested`: EADDRINUSE is portBusy, EACCES the port text, anything else the
+ * start-failed text. Used before 'listening' and in the handover gap (no caller ever saw that server listening).
+ */
+function listenFailure(e: NodeJS.ErrnoException, requested: number): ServerStatus {
+  if (e.code === 'EADDRINUSE') return { state: 'portBusy', port: requested };
+  if (e.code === 'EACCES') return unusable(requested);
+  return { ...START_FAILED };
+}
+
 /** Starts listening on 127.0.0.1:`port`. Never rejects: the status says how it went (S16). */
 export async function start(port: number, deps: ServerDeps): Promise<RunningServer> {
-  let status: ServerStatus = { state: 'error', message: STARTING_TEXT };
+  let status: ServerStatus = { ...STARTING };
   let current: http.Server | null = null;
   let stopped = false;
   let closing: Promise<void> | null = null;
@@ -286,7 +299,8 @@ export async function start(port: number, deps: ServerDeps): Promise<RunningServ
   let cancelPending: (() => void) | null = null;
   /**
    * The server whose 'listening' settled the attempt, until the continuation of ensure takes it (it becomes
-   * `current`, or is shut if stopped). stop() in that gap closes it; null outside the gap.
+   * `current`, or is shut if stopped). stop() in that gap closes it; an 'error' in that gap shuts it and turns the
+   * attempt into a listen failure (the continuation then reads no server). null outside the gap.
    */
   let handover: http.Server | null = null;
 
@@ -296,6 +310,8 @@ export async function start(port: number, deps: ServerDeps): Promise<RunningServ
       let settled = false;
       let timer: unknown = null;
       const at = { port: 0 };
+      /** The result 'listening' settled with; an 'error' in the handover gap rewrites it before ensure reads it. */
+      let listened: Attempt | null = null;
       const settle = (result: Attempt): boolean => {
         if (settled) return false;
         settled = true;
@@ -320,13 +336,13 @@ export async function start(port: number, deps: ServerDeps): Promise<RunningServ
         server.on('connect', (_req: http.IncomingMessage, socket: Duplex) => socket.destroy());
         server.on('clientError', onClientError);
       } catch {
-        settle({ status: { state: 'error', message: START_FAILED_TEXT }, server: null });
+        settle({ status: { ...START_FAILED }, server: null });
         return;
       }
 
       // stop() while this attempt waits: it settles now (the deadline timer is cleared) and the server is closed.
       cancelPending = () => {
-        settle({ status: { state: 'error', message: STOPPED_TEXT }, server: null });
+        settle({ status: { ...STOPPED }, server: null });
         shut(server);
       };
 
@@ -338,34 +354,42 @@ export async function start(port: number, deps: ServerDeps): Promise<RunningServ
         const address = server.address();
         at.port = typeof address === 'object' && address !== null ? address.port : 0;
         handover = server;
-        settle({ status: { state: 'listening', port: at.port }, server });
+        listened = { status: { state: 'listening', port: at.port }, server };
+        settle(listened);
       });
 
       server.on('error', (e: NodeJS.ErrnoException) => {
         if (!settled) {
           shut(server);
-          if (e.code === 'EADDRINUSE') settle({ status: { state: 'portBusy', port: requested }, server: null });
-          else if (e.code === 'EACCES') settle({ status: { state: 'error', message: accessText(requested) }, server: null });
-          else settle({ status: { state: 'error', message: START_FAILED_TEXT }, server: null });
+          settle({ status: listenFailure(e, requested), server: null });
           return;
         }
         // An error after listening: this listener is gone; leaving `listening` cancels the code.
         if (server === current) {
           current = null;
-          status = { state: 'error', message: BROKEN_TEXT };
+          status = { ...BROKEN };
           deps.pairing.cancel();
           shut(server);
+          return;
+        }
+        // An error in the handover gap: no caller saw this server listening, so it is a listen failure. The settled
+        // result is rewritten before the continuation of ensure reads it; the code was cancelled when the move began.
+        if (server === handover && listened !== null) {
+          handover = null;
+          shut(server);
+          listened.status = listenFailure(e, requested);
+          listened.server = null;
         }
       });
 
       timer = deps.setTimer(() => {
-        if (settle({ status: { state: 'error', message: START_FAILED_TEXT }, server: null })) shut(server);
+        if (settle({ status: { ...START_FAILED }, server: null })) shut(server);
       }, LISTEN_DEADLINE_MS);
 
       try {
         server.listen(requested, '127.0.0.1');
       } catch {
-        if (settle({ status: { state: 'error', message: START_FAILED_TEXT }, server: null })) shut(server);
+        if (settle({ status: { ...START_FAILED }, server: null })) shut(server);
       }
     });
 
@@ -377,7 +401,7 @@ export async function start(port: number, deps: ServerDeps): Promise<RunningServ
     const old = current;
     current = null;
     if (old) shut(old);
-    status = { state: 'error', message: STARTING_TEXT };
+    status = { ...STARTING };
     const result = await attempt(requested);
     handover = null;
     if (stopped) {
@@ -405,7 +429,7 @@ export async function start(port: number, deps: ServerDeps): Promise<RunningServ
       if (!stopped) {
         // Everything here runs before the first await, so the quit path can flush right after.
         stopped = true;
-        status = { state: 'error', message: STOPPED_TEXT };
+        status = { ...STOPPED };
         deps.pairing.cancel();
         deps.pairing.stopRetry();
         // A listen still pending (a port move in progress, current is null) is ended too; a late 'listening'

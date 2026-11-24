@@ -38,3 +38,40 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:<port>/v1/pair -ContentType
 | 17 | With a browser paired, Settings open and no code shown, make `pairing.json` read-only, then send `POST /v1/unpair` (Origin, `Authorization: Bearer <token>`, body `{}`) from PowerShell. | Within about 2 s the entry leaves the list and "Pairing changes are not saved to disk yet" appears, without touching the panel. |
 | 18 | Press **Pair a browser**, then set the Windows clock back one hour, then forward two. | The countdown keeps falling one per second, never shows more than 5:00, and the code stays shown and usable until its real five minutes end. |
 | 19 | Make `settings.json` read-only and save a new port (it fails). Type the old port back into the port field without saving, press **Pair a browser** and send the pairing request. Clear Read-only, type the new port again and save. | The dialog asks again; afterwards the list is empty and Fetchly listens on the new port. |
+
+## A2: extension shell
+
+Build the extension with `npm run build:ext`. In Chrome (`chrome://extensions`)
+and in Edge (`edge://extensions`), turn on **Developer mode** and press **Load
+unpacked** on `extension\dist`. "The popup" is the one that opens from the
+Fetchly toolbar icon.
+
+| # | Do | Expected |
+| --- | --- | --- |
+| 1 | Load the extension in Chrome and in Edge, and open the popup in each. Then set the browser's language to Arabic, restart it and open the popup again. | "Not paired" with the pairing form, in the browser's language. In Arabic the popup is right-to-left, and the example code in the "not a pairing code" message (type `x` and press **Pair**) reads port first: `38917-ABCD2345`. |
+| 2 | Press **Pair a browser** in Fetchly. Type the string in lower case, with the letter `O` for a `0` in the code, and press **Pair**. | "Connected" with the Fetchly version. The label (the name field, or Chrome/Edge when it is empty) is listed in Fetchly Settings → Browser. |
+| 3 | Unpair, press **Pair a browser**, and type a wrong code once. Then type a wrong code five times, then the right code. | First "Wrong code". After the five wrong codes, the right code gives "No code is open". |
+| 4 | With the browser paired, quit Fetchly (tray → **Quit**) and open the popup. | "Fetchly is not running" within 5 s. |
+| 5 | With Fetchly closed, run `node -e "require('http').createServer((q,s)=>{console.log(q.method,q.url,'Authorization:',q.headers.authorization?'yes':'no');s.end('x')}).listen(<port>,'127.0.0.1')"` on the paired port (replace `<port>`) and open the popup. The listener logs only the method, the path and whether an `Authorization` header is present, never its value. | "Another program uses this port". The listener log shows the hello (`POST /v1/hello Authorization: no`). The row passes only when the hello shows `Authorization: no` and no line shows `Authorization: yes`. |
+| 6 | With Fetchly closed, run a listener on the paired port that answers every request with `307` to a second port, and a second listener on that second port. Open the popup. | "Another program uses this port". The second port receives nothing. |
+| 7 | Press **Unpair** in the popup. Then pair again, quit Fetchly, and press **Unpair**. | The first time the entry leaves Settings → Browser. With Fetchly closed the popup says it was removed here, and the entry stays in Fetchly's list. |
+| 8 | Copy `extension\dist` to another folder, remove the loaded extension and load the copy. | "Not paired". The old entry stays in Fetchly's list until it is removed in Settings. |
+| 9 | Change the port in Fetchly (Settings, confirm the dialog), then open the popup. | "Fetchly is not running" with the hint to pair again. Pairing again with the new string works. |
+| 10 | Restart the browser with the unpacked extension kept, and open the popup. | Still "Connected" (this case is not probed automatically). |
+| 11 | Open the popup, right-click → **Inspect** → **Application**. | Extension storage (local, session, sync) is empty. The record is under IndexedDB → `fetchly` → `kv` → `pairing`. |
+| 12 | After A3 (a content script exists): in a web page's DevTools console, in the content script's context, run `indexedDB.open('fetchly')` and look at the result. | The database there has no `kv` store: the page's origin cannot see the extension's record. |
+| 13 | Turn on "clear cookies and site data when you close all windows", restart the browser, and open the popup. | Note whether the pairing survives the restart. |
+| 14 | Row 16 of the A1 section: both browsers paired from the same `extension\dist` folder. | As in A1 row 16. |
+
+## D: housekeeping
+
+Errors now carry a code, so the Arabic window shows them in Arabic. Rows 1, 2 and 4
+need the window in Arabic (Settings → Language → العربية, then Save).
+
+| # | Do | Expected |
+| --- | --- | --- |
+| 1 | Paste `ftp://x` into the link bar and press **إضافة**. | The error under the bar is Arabic: "أدخل رابطًا يبدأ بـ http:// أو https://", each link reading left to right. |
+| 2 | In Settings, set the port to `80` and press **حفظ**. | The dialog's error line is Arabic: "المنفذ يجب أن يكون عددًا صحيحًا من 1024 إلى 65535". Nothing is saved. |
+| 3 | On a PC where the download tools are not installed yet, put `"language": "ar"` in `%APPDATA%\fetchly\settings.json`, start Fetchly, disconnect the network and press **تثبيت**. | The install error stays English (for example "could not download …") and reads left to right inside the Arabic screen. |
+| 4 | Run `netsh interface ipv4 show excludedportrange protocol=tcp`. Pick a listed range that is **not** marked `*` and holds a port of 1024 or more, and save one of its ports in Settings. Ranges marked `*` are administered exclusions; in the Windows run on 2026-11-23, port 50000 in such a range (50000-50059) allowed a loopback bind, while 50100 in an unmarked range returned EACCES. | The banner is Arabic: "لا يمكن استخدام المنفذ … على هذا الكمبيوتر؛ اختر منفذًا آخر من الإعدادات", with the port in Western digits. If no unmarked range holds such a port, mark this row spec-only (`tests/server/port.test.ts`, `tests/renderer/bannersServer.test.ts`). |
+| 5 | (spec-only) | The notice "Settings were saved, but the running downloads did not take them" (`tests/ipcPairing.test.ts`, `tests/renderer/errors.test.ts`) and the Best-quality download that falls back when the height check passes 64 MB (`tests/engines/media.test.ts`) cannot be forced by hand. |

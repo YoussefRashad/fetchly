@@ -51,7 +51,7 @@ extension --HTTP POST 127.0.0.1:<port>--> main (local server)
 | `src/shared/protocol.ts` | ⚠ Browser wire protocol: limits, formats, error tokens, proof input |
 | `src/shared/i18n.ts`, `text.ts` | Language resolution, direction, isolates, control-character checks |
 | `src/renderer/src/` | The window: `App.tsx`, `components/`, `strings.ts` + `strings.ar.ts`, `banners.ts`, `format.ts` |
-| `extension/` | ⚠ MV3 extension (Phase 2 branches only until merged): `manifest.json`, `src/service-worker.ts`, `src/popup.ts`, `src/lib/*` |
+| `extension/` | ⚠ MV3 extension for Chrome and Edge: `manifest.json`, `src/service-worker.ts`, `src/popup.ts`, `src/lib/*`; built into `extension/dist/` |
 
 ## Tests and tooling
 

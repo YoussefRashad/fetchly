@@ -33,8 +33,9 @@ Invariants:
 Threat model and planned routes (hand-off, logins, cookies): the frozen
 `docs/superpowers/plans/2026-11-22-phase2-architecture.md`, sections 2 and 3.
 
-Extension (`extension/src/**`, Phase 2 branches until merged): the client side of the same boundary; it holds the
-token. Same review class as the server. Its rules are not documented here yet (`TODO.md`).
+Extension (`extension/src/**`): the client side of the same boundary; it holds the token
+(`src/lib/store.ts`) and talks to the server through `src/lib/client.ts`. Same review class as the server. Its own
+rules are not documented here yet (`TODO.md`).
 
 ## 2. Persisted state (migration-class)
 
